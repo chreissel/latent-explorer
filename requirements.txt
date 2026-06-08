@@ -1,0 +1,10 @@
+# latent-explorer dependencies (CPU-friendly)
+# Install torch from the CPU wheel index for a small, GPU-free footprint:
+#   pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.0
+torchvision>=0.15
+gradio>=5.0,<6.0
+numpy>=1.24
+pillow>=9.0
+h5py>=3.8
+requests>=2.28

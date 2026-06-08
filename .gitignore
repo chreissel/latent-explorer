@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Datasets (downloaded on first run) and trained weights (produced by train.py)
+data/
+models/
+
+# Gradio / misc
+flagged/
+.gradio/
+*.log
