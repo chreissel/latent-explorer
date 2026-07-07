@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 venv/
 .venv/
+latent-env/
 *.egg-info/
 
 # Datasets (downloaded on first run) and trained weights (produced by train.py)

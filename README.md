@@ -42,8 +42,8 @@ cd latent-explorer
 # git checkout claude/optimistic-dirac-6p1kap
 
 # 2. Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv latent-env      # 'latent-env' is the environment folder name — pick any name you like
+source latent-env/bin/activate
 pip install --upgrade pip
 ```
 
@@ -108,7 +108,7 @@ This produces galaxy-*like* fuzzy blobs and spirals — fine for a tech demo, bu
 ## Run the booth (works fully offline once trained)
 
 ```bash
-source venv/bin/activate
+source latent-env/bin/activate
 python app.py
 ```
 
@@ -140,7 +140,7 @@ python train.py --epochs 30 --latent-dim 24 # override hyperparameters
 
 ## Booth-day checklist
 
-1. `source venv/bin/activate`
+1. `source latent-env/bin/activate`
 2. `python app.py`
 3. Open `http://localhost:7860` full-screen.
 4. No Wi-Fi needed — enjoy. 🎉
