@@ -195,35 +195,17 @@ def on_dataset_change(dataset: str):
 # ---------------------------------------------------------------------------
 # Interface
 # ---------------------------------------------------------------------------
-INTRO = """
-# 🌌 Latent Explorer
-### Two AIs, one machine — see what a model *imagines*
-
-A **latent space** is the secret shorthand an AI invents while learning. Instead
-of storing every pixel, it boils each image down to just a few numbers, then
-rebuilds the picture from them. Move through that space of numbers and the images
-morph smoothly — you're literally walking through the model's imagination.
-
-The **exact same program** trained both models below. The only difference is what
-they were shown: one looked at handwritten **digits**, the other at photos of
-**galaxies**. Same machine, two very different daydreams.
-"""
-
-DIGIT_HELP = ("**Tap anywhere on the map** — every spot is a different digit the "
-              "model dreams up. The whole square is its entire imagination at once.")
-MORPH_HELP = ("Pick two real pictures and drag the slider to **melt one into the "
-              "other**, passing through shapes that don't exist in between.")
+HEADLINE = "<h1 style='text-align:center;font-size:3rem;margin:0.4em 0'>Image generation</h1>"
 
 
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Latent Explorer", theme=gr.themes.Soft(
+    with gr.Blocks(title="Image generation", theme=gr.themes.Soft(
             font=[gr.themes.GoogleFont("Inter"), "sans-serif"])) as demo:
-        gr.Markdown(INTRO)
+        gr.HTML(HEADLINE)
 
         with gr.Tabs():
             # --- Digit Explorer ---------------------------------------
             with gr.Tab("✏️  Digit Explorer"):
-                gr.Markdown(DIGIT_HELP)
                 with gr.Row():
                     pad = gr.Image(label="Latent map — tap to explore",
                                    interactive=False, height=480,
@@ -245,7 +227,6 @@ def build_ui() -> gr.Blocks:
 
             # --- Morph / Blend ----------------------------------------
             with gr.Tab("🔀  Morph / Blend"):
-                gr.Markdown(MORPH_HELP)
                 dataset = gr.Radio(
                     choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
                     value="digits", label="Dataset")
