@@ -289,6 +289,18 @@ def build_ui() -> gr.Blocks:
 
 
 if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Launch the Latent Explorer booth UI")
+    ap.add_argument("--share", action="store_true",
+                    help="create a public gradio.live link (handy on remote "
+                         "JupyterLab / cloud where localhost isn't reachable)")
+    ap.add_argument("--port", type=int, default=7860, help="server port")
+    ap.add_argument("--root-path", default=None,
+                    help="mount path when behind a proxy, e.g. /proxy/7860 for "
+                         "jupyter-server-proxy")
+    cli = ap.parse_args()
+
     # Eagerly load both models so the booth is responsive from the first tap.
     for _n in ("digits", "galaxies"):
         try:
@@ -296,4 +308,5 @@ if __name__ == "__main__":
             print(f"loaded model: {_n}")
         except FileNotFoundError as e:
             print(f"WARNING: {e}")
-    build_ui().launch(server_name="0.0.0.0", server_port=7860, show_api=False)
+    build_ui().launch(server_name="0.0.0.0", server_port=cli.port,
+                      share=cli.share, root_path=cli.root_path, show_api=False)

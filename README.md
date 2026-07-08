@@ -116,6 +116,20 @@ Then open **http://localhost:7860** in a browser (full-screen / kiosk mode is
 nice for a booth). No internet required at this point — datasets are cached in
 `data/` and weights are loaded from `models/`.
 
+**Running on a remote host (e.g. JupyterLab / cloud)?** `localhost` won't be
+reachable from your laptop. Either get a public link:
+
+```bash
+python app.py --share            # prints a https://xxxx.gradio.live URL (needs internet)
+```
+
+or, if `jupyter-server-proxy` is available, open
+`https://<jupyter-host>/proxy/7860/` (with trailing slash) and launch with:
+
+```bash
+python app.py --root-path /proxy/7860
+```
+
 ### Changing where datasets are stored
 
 By default datasets download into `data/`. To put them elsewhere (e.g. a big
