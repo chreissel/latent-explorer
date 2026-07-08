@@ -116,6 +116,17 @@ Then open **http://localhost:7860** in a browser (full-screen / kiosk mode is
 nice for a booth). No internet required at this point — datasets are cached in
 `data/` and weights are loaded from `models/`.
 
+### Changing where datasets are stored
+
+By default datasets download into `data/`. To put them elsewhere (e.g. a big
+external disk), set the `LATENT_DATA_DIR` environment variable before running
+`train.py` / `app.py` — no code changes needed:
+
+```bash
+export LATENT_DATA_DIR=/mnt/bigdisk/latent-data
+python train.py        # MNIST + Galaxy10 now download under $LATENT_DATA_DIR
+```
+
 ---
 
 ## Project structure

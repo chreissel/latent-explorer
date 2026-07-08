@@ -17,7 +17,9 @@ import os
 import numpy as np
 import torch
 
-DATA_DIR = "data"
+# Where datasets are downloaded/cached. Override without code changes by setting
+# the LATENT_DATA_DIR environment variable (e.g. a big external disk).
+DATA_DIR = os.environ.get("LATENT_DATA_DIR", "data")
 GALAXY10_PATH = os.path.join(DATA_DIR, "Galaxy10.h5")
 
 # Mirrors for the Galaxy10 SDSS .h5 (the original 69x69x3 version used by
