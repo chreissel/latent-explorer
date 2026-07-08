@@ -207,10 +207,10 @@ def build_ui() -> gr.Blocks:
             # --- Digit Explorer ---------------------------------------
             with gr.Tab("✏️  Image generation"):
                 with gr.Row():
-                    pad = gr.Image(label="Latent map — tap to explore",
+                    pad = gr.Image(label="Input — tap to explore",
                                    interactive=False, height=480,
                                    show_download_button=False)
-                    out_digit = gr.Image(label="Imagined digit", height=480,
+                    out_digit = gr.Image(label="Generated Image", height=480,
                                          show_download_button=False)
                 coord_lbl = gr.Markdown()
                 with gr.Row():
