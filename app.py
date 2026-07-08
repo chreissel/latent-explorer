@@ -205,7 +205,7 @@ def build_ui() -> gr.Blocks:
 
         with gr.Tabs():
             # --- Digit Explorer ---------------------------------------
-            with gr.Tab("✏️  Digit Explorer"):
+            with gr.Tab("✏️  Image generation"):
                 with gr.Row():
                     pad = gr.Image(label="Latent map — tap to explore",
                                    interactive=False, height=480,
@@ -226,7 +226,7 @@ def build_ui() -> gr.Blocks:
                               [out_digit, pad, coord_lbl])
 
             # --- Morph / Blend ----------------------------------------
-            with gr.Tab("🔀  Morph / Blend"):
+            with gr.Tab("🔀  Morphing"):
                 dataset = gr.Radio(
                     choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
                     value="digits", label="Dataset")
