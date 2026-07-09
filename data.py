@@ -118,6 +118,24 @@ def load_galaxy10(max_images: int | None = None) -> torch.Tensor:
     return x
 
 
+def load_galaxy10_labeled(n: int | None = None):
+    """Return (images, labels): images (N,3,69,69) in [0,1], labels (N,) 0-9
+    (Galaxy10 morphology classes). Cached .h5 is downloaded if needed."""
+    import h5py
+
+    path = download_galaxy10()
+    with h5py.File(path, "r") as f:
+        images = np.asarray(f["images"])          # (N, 69, 69, 3) uint8
+        labels = np.asarray(f["ans"]).astype(np.int64)  # (N,) 0-9
+    x = torch.from_numpy(images).float() / 255.0
+    x = x.permute(0, 3, 1, 2).contiguous()
+    y = torch.from_numpy(labels)
+    if n is not None and n < x.size(0):
+        idx = torch.randperm(x.size(0))[:n]
+        x, y = x[idx], y[idx]
+    return x, y
+
+
 # --- Synthetic galaxy stand-in ------------------------------------------
 # A procedurally-generated "galaxy-like" dataset (fuzzy elliptical bulges with
 # optional spiral arms, varied colour/orientation/brightness) at the SAME shape
@@ -125,15 +143,17 @@ def load_galaxy10(max_images: int | None = None) -> torch.Tensor:
 # app's Morph tab fully OFFLINE -- no 200 MB download -- when the real dataset
 # is unavailable. It is NOT a substitute for real Galaxy10 at the booth; train
 # on the real data there for recognizable reconstructions.
-def synthetic_galaxies(n: int = 6000, seed: int = 0) -> torch.Tensor:
+def synthetic_galaxies(n: int = 6000, seed: int = 0, return_labels: bool = False):
     rng = np.random.default_rng(seed)
     S = 69
     yy, xx = np.mgrid[0:S, 0:S].astype(np.float32)
     cx = cy = (S - 1) / 2.0
     out = np.zeros((n, S, S, 3), dtype=np.float32)
+    labels = np.zeros(n, dtype=np.int64)
     for i in range(n):
         ax = rng.uniform(6, 16)              # bulge radii
-        ay = ax * rng.uniform(0.4, 1.0)
+        elong = rng.uniform(0.4, 1.0)
+        ay = ax * elong
         ang = rng.uniform(0, np.pi)
         ca, sa = np.cos(ang), np.sin(ang)
         x = (xx - cx) * ca + (yy - cy) * sa
@@ -141,11 +161,12 @@ def synthetic_galaxies(n: int = 6000, seed: int = 0) -> torch.Tensor:
         r2 = (x / ax) ** 2 + (y / ay) ** 2
         bulge = np.exp(-r2)                   # smooth elliptical bulge
         img = bulge.copy()
-        if rng.random() < 0.5:               # add spiral arms for ~half
+        spiral_on = rng.random() < 0.5
+        arms = int(rng.integers(2, 4))
+        if spiral_on:                         # add spiral arms for ~half
             r = np.sqrt(x ** 2 + y ** 2) + 1e-3
             theta = np.arctan2(y, x)
             tightness = rng.uniform(0.3, 0.7)
-            arms = rng.integers(2, 4)
             spiral = 0.5 * (1 + np.cos(arms * theta - r * tightness))
             img += 0.6 * spiral * np.exp(-r / rng.uniform(10, 20))
         img = img / (img.max() + 1e-6)
@@ -155,7 +176,16 @@ def synthetic_galaxies(n: int = 6000, seed: int = 0) -> torch.Tensor:
         colored = img[..., None] * tint[None, None, :]
         colored += rng.normal(0, 0.02, size=colored.shape)  # faint noise
         out[i] = np.clip(colored, 0, 1)
-    return torch.from_numpy(out).permute(0, 3, 1, 2).contiguous()
+        # Pseudo "morphology class" so the offline stand-in has structure to map:
+        # 0-2 = elliptical (round..elongated), 3-4 = spiral (2..3 arms).
+        if spiral_on:
+            labels[i] = 3 + (arms - 2)
+        else:
+            labels[i] = 0 if elong > 0.8 else (1 if elong > 0.6 else 2)
+    x = torch.from_numpy(out).permute(0, 3, 1, 2).contiguous()
+    if return_labels:
+        return x, torch.from_numpy(labels)
+    return x
 
 
 def load_dataset(
@@ -167,4 +197,18 @@ def load_dataset(
         if synthetic:
             return synthetic_galaxies(n=max_images or 6000)
         return load_galaxy10(max_images=max_images)
+    raise ValueError(f"Unknown dataset: {name}")
+
+
+def load_labeled(name: str, n: int | None = None):
+    """(images, labels) for building a latent class-map. For galaxies, uses the
+    real Galaxy10 (with morphology labels) and falls back to the labelled
+    synthetic stand-in if the .h5 can't be fetched (offline testing)."""
+    if name == "digits":
+        return load_mnist_labeled(n=n)
+    if name == "galaxies":
+        try:
+            return load_galaxy10_labeled(n=n)
+        except Exception:
+            return synthetic_galaxies(n=n or 6000, return_labels=True)
     raise ValueError(f"Unknown dataset: {name}")

@@ -152,63 +152,75 @@ def _load_font(size: int):
         return ImageFont.load_default()
 
 
-def _compute_clouds(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
-                    spread: float = 0.6, fade: float = 1.6):
-    """Soft class-density background (no numerals) + de-collided label spots.
-
-    Each digit class becomes a Gaussian "cloud" of its colour, dense where lots
-    of that digit's images land and fading to white further out. Returns the
-    numeral-free cloud image plus a list of (px, py, class) label positions, so
-    numerals can be drawn crisply on top afterwards (even over a blurred copy).
-    """
-    import data as datamod
-
-    imgs, labels = datamod.load_mnist_labeled(n=n_fit)
+# --- Projection to a clickable 2-D plane --------------------------------
+# The digit latent is already 2-D; the galaxy latent is 24-D. To give BOTH a
+# 2-D "map", we project each model's latent space down to 2-D: identity for
+# digits, PCA (top-2 principal components) for galaxies. The map, the pad and
+# the morph path all live in this projected plane. Moving in it changes the two
+# most important latent directions while the rest stay at the data average.
+def _encode_all(lm: LoadedModel, imgs: torch.Tensor, bs: int = 512) -> np.ndarray:
+    outs = []
     with torch.no_grad():
-        mu, _ = lm.model.encode(imgs.to(DEVICE))
-    pts = mu.cpu().numpy()
-    labels = labels.numpy()
+        for i in range(0, imgs.size(0), bs):
+            mu, _ = lm.model.encode(imgs[i:i + bs].to(DEVICE))
+            outs.append(mu.cpu().numpy())
+    return np.concatenate(outs, axis=0)
 
-    # Per-class Gaussian (mean + slightly inflated covariance for a soft fade).
-    means, invs, classes = {}, {}, []
-    for c in range(10):
-        Xc = pts[labels == c]
+
+def proj_to2d(m: dict, z) -> np.ndarray:
+    return (np.asarray(z, dtype=np.float64) - m["mean"]) @ m["comp"].T
+
+
+def proj_to_latent(m: dict, p) -> np.ndarray:
+    return m["mean"] + np.asarray(p, dtype=np.float64) @ m["comp"]
+
+
+def coord_to_px(x, y, xr, yr, W, H):
+    return (x + xr) / (2 * xr) * W, (yr - y) / (2 * yr) * H
+
+
+def px_to_coord(px, py, xr, yr, W, H):
+    return px / W * (2 * xr) - xr, yr - py / H * (2 * yr)
+
+
+def _clouds_from_points(P, labels, size, xr, yr, spread=0.6, fade=1.6):
+    """Soft class-density image (no numerals) + de-collided label spots for a
+    set of 2-D points P with integer class labels."""
+    classes, means, invs = [], {}, {}
+    reg = 1e-2 * ((xr + yr) / 2) ** 2
+    for c in sorted({int(v) for v in labels}):
+        Xc = P[labels == c]
         if len(Xc) < 5:
             continue
-        cov = (np.cov(Xc.T) + np.eye(2) * 1e-2) * spread
+        cov = (np.cov(Xc.T) + np.eye(2) * reg) * spread
         means[c] = Xc.mean(0)
         invs[c] = np.linalg.inv(cov)
         classes.append(c)
 
-    # Grid of latent coords over the plane (top row = high y).
     W = H = size
-    xs = np.linspace(-LATENT_RANGE, LATENT_RANGE, W)
-    ys = np.linspace(LATENT_RANGE, -LATENT_RANGE, H)
+    xs = np.linspace(-xr, xr, W)
+    ys = np.linspace(yr, -yr, H)
     gx, gy = np.meshgrid(xs, ys)
     G = np.stack([gx.ravel(), gy.ravel()], axis=1)
 
-    # Each class weight peaks at 1 at its mean and decays with distance.
     Wc = np.empty((len(classes), G.shape[0]), dtype=np.float64)
     for i, c in enumerate(classes):
         d = G - means[c]
         Wc[i] = np.exp(-0.5 * np.einsum("pi,ij,pj->p", d, invs[c], d))
 
-    colors = np.array([DIGIT_COLORS[c] for c in classes], dtype=np.float64)
+    colors = np.array([DIGIT_COLORS[c % len(DIGIT_COLORS)] for c in classes],
+                      dtype=np.float64)
     wsum = Wc.sum(0) + 1e-8
-    blended = (Wc.T @ colors) / wsum[:, None]           # colour mix per pixel
-    alpha = np.clip(Wc.max(0), 0.0, 1.0) ** fade        # density -> opacity
+    blended = (Wc.T @ colors) / wsum[:, None]
+    alpha = np.clip(Wc.max(0), 0.0, 1.0) ** fade
     white = np.array([250.0, 250.0, 250.0])
     px_col = white[None, :] * (1 - alpha[:, None]) + blended * alpha[:, None]
     arr = np.clip(px_col, 0, 255).astype(np.uint8).reshape(H, W, 3)
     clouds = Image.fromarray(arr, mode="RGB")
 
-    # Numeral positions (pixels). Classes like 4 & 9 sit almost on top of each
-    # other in latent space, so we nudge only the *labels* apart (leaving the
-    # colour clouds truthful) until each numeral is individually readable.
-    pos = np.array([
-        [(means[c][0] + LATENT_RANGE) / (2 * LATENT_RANGE) * W,
-         (LATENT_RANGE - means[c][1]) / (2 * LATENT_RANGE) * H]
-        for c in classes], dtype=float)
+    # Label positions (pixels), nudged apart so overlapping classes stay legible.
+    pos = np.array([list(coord_to_px(means[c][0], means[c][1], xr, yr, W, H))
+                    for c in classes], dtype=float)
     min_dist = 46.0
     for _ in range(120):
         moved = False
@@ -226,7 +238,7 @@ def _compute_clouds(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
             break
     pos[:, 0] = np.clip(pos[:, 0], 22, W - 22)
     pos[:, 1] = np.clip(pos[:, 1], 22, H - 22)
-    label_spots = [(float(px), float(py), c)
+    label_spots = [(float(px), float(py), int(c))
                    for (px, py), c in zip(pos, classes)]
     return clouds, label_spots
 
@@ -236,7 +248,7 @@ def _draw_numerals(img: Image.Image, label_spots, size: int = 44) -> Image.Image
     draw = ImageDraw.Draw(img)
     font = _load_font(size)
     for px, py, c in label_spots:
-        deep = tuple(int(ch * 0.55) for ch in DIGIT_COLORS[c])
+        deep = tuple(int(ch * 0.55) for ch in DIGIT_COLORS[c % len(DIGIT_COLORS)])
         for ox, oy in ((-2, -2), (2, -2), (-2, 2), (2, 2),
                        (-2, 0), (2, 0), (0, -2), (0, 2)):
             draw.text((px + ox, py + oy), str(c), fill=(255, 255, 255),
@@ -245,120 +257,131 @@ def _draw_numerals(img: Image.Image, label_spots, size: int = 44) -> Image.Image
     return img
 
 
-_CLOUDS_CACHE: dict[str, tuple] = {}
+_MAP_CACHE: dict[str, dict] = {}
 
 
-def get_clouds(lm: LoadedModel):
-    """Cached (numeral-free cloud image, label spots) for the digit latent map."""
-    if lm.name not in _CLOUDS_CACHE:
-        _CLOUDS_CACHE[lm.name] = _compute_clouds(lm)
-    return _CLOUDS_CACHE[lm.name]
-
-
-def build_class_region_map(lm: LoadedModel) -> Image.Image:
-    """Full latent map: colour clouds with crisp class numerals on top."""
-    clouds, label_spots = get_clouds(lm)
-    return _draw_numerals(clouds.copy(), label_spots)
+def get_map(lm: LoadedModel) -> dict:
+    """Cached 2-D latent map for a model: projection + colour clouds + labels.
+    Identity projection for a 2-D latent (digits); PCA for higher-D (galaxies).
+    """
+    if lm.name not in _MAP_CACHE:
+        import data as datamod
+        imgs, labels = datamod.load_labeled(lm.name, n=8000)
+        Z = _encode_all(lm, imgs)
+        labels = np.asarray(labels)
+        if Z.shape[1] == 2:
+            mean, comp = np.zeros(2), np.eye(2)
+            xr = yr = LATENT_RANGE
+            P = Z
+        else:
+            mean = Z.mean(0)
+            Zc = Z - mean
+            _, _, Vt = np.linalg.svd(Zc, full_matrices=False)
+            comp = Vt[:2]                       # top-2 principal directions
+            P = Zc @ comp.T
+            xr = float(np.percentile(np.abs(P[:, 0]), 98)) * 1.15 + 1e-6
+            yr = float(np.percentile(np.abs(P[:, 1]), 98)) * 1.15 + 1e-6
+        clouds, label_spots = _clouds_from_points(P, labels, 560, xr, yr)
+        _MAP_CACHE[lm.name] = {"mean": mean, "comp": comp, "xr": xr, "yr": yr,
+                               "clouds": clouds, "labels": label_spots}
+    return _MAP_CACHE[lm.name]
 
 
 _PAD_CACHE: dict[str, Image.Image] = {}
 
 
 def get_pad_base(lm: LoadedModel) -> Image.Image:
-    """The clickable pad background: class-region map, or decoded grid if the
-    labelled MNIST cache isn't available."""
+    """Full latent map image: colour clouds with crisp numerals on top."""
     if lm.name not in _PAD_CACHE:
-        try:
-            _PAD_CACHE[lm.name] = build_class_region_map(lm)
-        except Exception as e:
-            print(f"class-region map unavailable ({e}); using decoded grid")
-            _PAD_CACHE[lm.name] = build_latent_grid(lm).convert("RGB")
+        m = get_map(lm)
+        _PAD_CACHE[lm.name] = _draw_numerals(m["clouds"].copy(), m["labels"])
     return _PAD_CACHE[lm.name]
 
 
-def pad_with_marker(lm: LoadedModel, lx: float, ly: float) -> Image.Image:
-    """Latent map (RGB) with a crosshair drawn at latent coord (lx, ly)."""
-    grid = get_pad_base(lm).copy()
-    W, H = grid.size
-    px = int((lx + LATENT_RANGE) / (2 * LATENT_RANGE) * W)
-    py = int((LATENT_RANGE - ly) / (2 * LATENT_RANGE) * H)
-    d = ImageDraw.Draw(grid)
+def pad_with_marker(lm: LoadedModel, x: float, y: float) -> Image.Image:
+    """The latent map with a crosshair at projected coord (x, y)."""
+    base = get_pad_base(lm).copy()
+    m = get_map(lm)
+    W, H = base.size
+    px, py = coord_to_px(x, y, m["xr"], m["yr"], W, H)
+    d = ImageDraw.Draw(base)
     r = 11
     d.ellipse([px - r, py - r, px + r, py + r], outline=(255, 255, 255), width=5)
     d.line([(px - r, py), (px + r, py)], fill=(255, 60, 60), width=3)
     d.line([(px, py - r), (px, py + r)], fill=(255, 60, 60), width=3)
     d.ellipse([px - r, py - r, px + r, py + r], outline=(255, 60, 60), width=3)
-    return grid
+    return base
 
 
-def digit_from_latent(lx: float, ly: float):
-    lm = get_model("digits")
-    z = torch.tensor([[lx, ly]], dtype=torch.float32)
-    img = decode(lm, z)
-    return (tensor_to_pil(img, BIG, smooth=False),
-            pad_with_marker(lm, lx, ly),
-            f"<div style='font-size:1.7rem;font-weight:700;text-align:center'>"
-            f"input = ({lx:+.2f}, {ly:+.2f})</div>")
+READOUT = ("<div style='font-size:1.7rem;font-weight:700;text-align:center'>"
+           "input = ({:+.2f}, {:+.2f})</div>")
 
 
-def on_pad_click(evt: gr.SelectData):
-    lm = get_model("digits")
-    grid = get_pad_base(lm)
-    W, H = grid.size
-    px, py = evt.index  # pixel coords on the displayed pad
-    lx = px / W * (2 * LATENT_RANGE) - LATENT_RANGE
-    ly = LATENT_RANGE - py / H * (2 * LATENT_RANGE)
-    out_img, pad_img, label = digit_from_latent(lx, ly)
-    return out_img, pad_img, label, round(lx, 2), round(ly, 2)
+def generate_from_xy(dataset: str, x: float, y: float):
+    """Decode the image at projected coord (x, y). Returns (image, pad, readout)."""
+    lm = get_model(dataset)
+    m = get_map(lm)
+    z = proj_to_latent(m, [x, y])
+    zt = torch.tensor(z, dtype=torch.float32).unsqueeze(0)
+    img = decode(lm, zt)
+    return (tensor_to_pil(img, BIG, smooth=lm.channels == 3),
+            pad_with_marker(lm, x, y),
+            READOUT.format(x, y))
+
+
+def on_pad_click(dataset: str, evt: gr.SelectData):
+    lm = get_model(dataset)
+    m = get_map(lm)
+    W, H = get_pad_base(lm).size
+    px, py = evt.index
+    x, y = px_to_coord(px, py, m["xr"], m["yr"], W, H)
+    out_img, pad_img, label = generate_from_xy(dataset, x, y)
+    return out_img, pad_img, label, round(x, 2), round(y, 2)
+
+
+def on_gen_dataset_change(dataset: str):
+    """Switch the Image-generation tab to another dataset: reset pad + sliders
+    to that model's 2-D map and coordinate ranges."""
+    m = get_map(get_model(dataset))
+    out_img, pad_img, label = generate_from_xy(dataset, 0.0, 0.0)
+    return (out_img, pad_img, label,
+            gr.update(minimum=-m["xr"], maximum=m["xr"], value=0.0),
+            gr.update(minimum=-m["yr"], maximum=m["yr"], value=0.0))
 
 
 # ---------------------------------------------------------------------------
 # Morph / Interpolation (both datasets)
 # ---------------------------------------------------------------------------
-def _latent_to_px(z, W: int, H: int) -> tuple[float, float]:
-    x, y = float(z[0]), float(z[1])
-    px = (x + LATENT_RANGE) / (2 * LATENT_RANGE) * W
-    py = (LATENT_RANGE - y) / (2 * LATENT_RANGE) * H
-    return px, py
+def interp_image(lm: LoadedModel, za: torch.Tensor, zb: torch.Tensor, t: float):
+    z = (1 - t) * za + t * zb
+    img = decode(lm, z.unsqueeze(0))
+    return tensor_to_pil(img, BIG, smooth=lm.channels == 3)
 
 
 def trajectory_map(dataset: str, za, zb, t: float):
-    """Draw the morph path A->B on the digit latent map, with the current
-    interpolation point marked. Only meaningful for the 2-D digit latent space;
-    galaxies (24-D) have no 2-D plane to plot, so this returns None.
-    """
-    if dataset != "digits" or za is None or zb is None:
+    """Draw the morph path A->B on the model's 2-D latent map (PCA-projected for
+    galaxies), with the current interpolation point marked."""
+    if za is None or zb is None:
         return None
-    lm = get_model("digits")
-    try:
-        clouds, label_spots = get_clouds(lm)
-        # Gently soften + lighten only the colour clouds, then draw the numerals
-        # crisply on top so they stay easy to read.
-        base = clouds.filter(ImageFilter.GaussianBlur(radius=2))
-        base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)),
-                           0.15)
-        _draw_numerals(base, label_spots)
-    except Exception:
-        base = get_pad_base(lm).copy()
-
+    lm = get_model(dataset)
+    m = get_map(lm)
+    base = m["clouds"].filter(ImageFilter.GaussianBlur(radius=2))
+    base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)), 0.15)
+    _draw_numerals(base, m["labels"])
     W, H = base.size
-    ax, ay = _latent_to_px(za, W, H)
-    bx, by = _latent_to_px(zb, W, H)
-    cx, cy = _latent_to_px((1 - t) * za + t * zb, W, H)
+    a2, b2 = proj_to2d(m, za.numpy()), proj_to2d(m, zb.numpy())
+    c2 = (1 - t) * a2 + t * b2
+    ax, ay = coord_to_px(a2[0], a2[1], m["xr"], m["yr"], W, H)
+    bx, by = coord_to_px(b2[0], b2[1], m["xr"], m["yr"], W, H)
+    cx, cy = coord_to_px(c2[0], c2[1], m["xr"], m["yr"], W, H)
     d = ImageDraw.Draw(base)
-
-    # Bold path: black casing with a bright red core.
     d.line([(ax, ay), (bx, by)], fill=(10, 10, 10), width=10)
     d.line([(ax, ay), (bx, by)], fill=(230, 30, 30), width=4)
-
-    # Endpoints: plain black dots (no A/B labels).
     for x, y in ((ax, ay), (bx, by)):
         r = 12
         d.ellipse([x - r - 2, y - r - 2, x + r + 2, y + r + 2],
                   fill=(255, 255, 255))
         d.ellipse([x - r, y - r, x + r, y + r], fill=(10, 10, 10))
-
-    # Current position along the path: bright red dot, black-ringed.
     r = 16
     d.ellipse([cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3],
               fill=(255, 255, 255))
@@ -378,20 +401,13 @@ def _fresh_endpoints(dataset: str):
     thumb_a = tensor_to_pil(lm.sample_bank[ia], THUMB, smooth)
     thumb_b = tensor_to_pil(lm.sample_bank[ib], THUMB, smooth)
     blended = interp_image(lm, za, zb, 0.5)
-    traj = gr.update(value=trajectory_map(dataset, za, zb, 0.5),
-                     visible=(dataset == "digits"))
+    traj = trajectory_map(dataset, za, zb, 0.5)
     return za, zb, thumb_a, thumb_b, blended, traj, 0.5
 
 
 # random-endpoints button and dataset switch share the same behaviour.
 random_endpoints = _fresh_endpoints
 on_dataset_change = _fresh_endpoints
-
-
-def interp_image(lm: LoadedModel, za: torch.Tensor, zb: torch.Tensor, t: float):
-    z = (1 - t) * za + t * zb
-    img = decode(lm, z.unsqueeze(0))
-    return tensor_to_pil(img, BIG, smooth=lm.channels == 3)
 
 
 def on_blend(dataset: str, za, zb, t: float):
@@ -402,20 +418,19 @@ def on_blend(dataset: str, za, zb, t: float):
 
 
 def on_traj_click(dataset: str, za, zb, evt: gr.SelectData):
-    """Click/drag on the path plot -> slide the blend point to the nearest
-    spot along the A->B line. Updates the blended image, the map, and the
-    slider so all three stay in sync."""
-    if dataset != "digits" or za is None or zb is None:
+    """Click on the path plot -> slide the blend point to the nearest spot along
+    the projected A->B line. Keeps the image, map and slider in sync."""
+    if za is None or zb is None:
         return gr.update(), gr.update(), gr.update()
-    lm = get_model("digits")
-    W, H = get_pad_base(lm).size
+    lm = get_model(dataset)
+    m = get_map(lm)
+    W, H = m["clouds"].size
     px, py = evt.index
-    lx = px / W * (2 * LATENT_RANGE) - LATENT_RANGE
-    ly = LATENT_RANGE - py / H * (2 * LATENT_RANGE)
-    p = torch.tensor([lx, ly], dtype=za.dtype)
-    ab = zb - za
-    denom = float(torch.dot(ab, ab))
-    t = 0.0 if denom < 1e-9 else float(torch.dot(p - za, ab) / denom)
+    x, y = px_to_coord(px, py, m["xr"], m["yr"], W, H)
+    a2, b2 = proj_to2d(m, za.numpy()), proj_to2d(m, zb.numpy())
+    ab = b2 - a2
+    denom = float(ab @ ab)
+    t = 0.0 if denom < 1e-9 else float((np.array([x, y]) - a2) @ ab / denom)
     t = min(max(t, 0.0), 1.0)
     return (interp_image(lm, za, zb, t),
             trajectory_map(dataset, za, zb, t),
@@ -425,15 +440,31 @@ def on_traj_click(dataset: str, za, zb, evt: gr.SelectData):
 # ---------------------------------------------------------------------------
 # Interface
 # ---------------------------------------------------------------------------
+BIG_FONT_CSS = """
+:root { --text-lg: 20px; --text-xl: 26px; }
+.gradio-container, .gradio-container * { font-size: 1.12rem; }
+button.svelte-1ixn6qd, .tab-nav button, button[role="tab"] {
+    font-size: 1.5rem !important; font-weight: 700 !important;
+    padding: 0.5em 1em !important;
+}
+.gradio-container h1 { font-size: 2.6rem !important; font-weight: 800; }
+label span, .label-wrap span, span[data-testid] { font-size: 1.15rem !important; }
+"""
+
+
 def build_ui() -> gr.Blocks:
-    with gr.Blocks(title="Image generation", theme=gr.themes.Soft(
-            font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
-            text_size=gr.themes.sizes.text_lg)) as demo:
+    with gr.Blocks(title="Image generation", css=BIG_FONT_CSS,
+                   theme=gr.themes.Soft(
+                       font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+                       text_size=gr.themes.sizes.text_lg)) as demo:
         gr.Markdown("# Image generation")
 
         with gr.Tabs():
-            # --- Digit Explorer ---------------------------------------
+            # --- Image generation: click the 2-D latent map -----------
             with gr.Tab("✏️  Image generation"):
+                gen_ds = gr.Radio(
+                    choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
+                    value="digits", label="Dataset")
                 with gr.Row(equal_height=False):
                     # Left column: input pad + sliders + readout (all share the
                     # pad's width, so the sliders match the left plot's length).
@@ -450,19 +481,21 @@ def build_ui() -> gr.Blocks:
                         out_digit = gr.Image(label="Generated Image", height=480,
                                              show_download_button=False)
 
-                pad.select(on_pad_click, None,
+                pad.select(on_pad_click, [gen_ds],
                            [out_digit, pad, coord_lbl, sx, sy])
                 for s in (sx, sy):
-                    s.release(digit_from_latent, [sx, sy],
-                              [out_digit, pad, coord_lbl])
+                    s.input(generate_from_xy, [gen_ds, sx, sy],
+                            [out_digit, pad, coord_lbl], show_progress="hidden")
+                gen_ds.change(on_gen_dataset_change, [gen_ds],
+                              [out_digit, pad, coord_lbl, sx, sy])
 
-            # --- Morph / Blend ----------------------------------------
+            # --- Morphing: interpolate two samples along a path -------
             with gr.Tab("🔀  Morphing"):
                 dataset = gr.Radio(
                     choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
                     value="digits", label="Dataset")
                 with gr.Row(equal_height=False):
-                    # Digit-only: the morph path drawn on the latent map.
+                    # The morph path drawn on the (projected) latent map.
                     traj_map = gr.Image(label="Path through latent space",
                                         height=BIG, interactive=False,
                                         show_download_button=False)
@@ -500,7 +533,7 @@ def build_ui() -> gr.Blocks:
 
         # Initialize both tabs on load.
         def _init():
-            d_img, d_pad, d_lbl = digit_from_latent(0.0, 0.0)
+            d_img, d_pad, d_lbl = generate_from_xy("digits", 0.0, 0.0)
             za, zb, ta, tb, bl, traj, t = random_endpoints("digits")
             return d_img, d_pad, d_lbl, za, zb, ta, tb, bl, traj, t
 
