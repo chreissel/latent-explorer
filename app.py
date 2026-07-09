@@ -312,9 +312,10 @@ def trajectory_map(dataset: str, za, zb, t: float):
         return None
     lm = get_model("digits")
     base = get_pad_base(lm).copy()
-    # Blur + fade the map into a soft backdrop so the path pops.
-    base = base.filter(ImageFilter.GaussianBlur(radius=10))
-    base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)), 0.45)
+    # Gently soften + lighten the map so the path pops but the numerals stay
+    # readable.
+    base = base.filter(ImageFilter.GaussianBlur(radius=3))
+    base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)), 0.25)
 
     W, H = base.size
     ax, ay = _latent_to_px(za, W, H)
@@ -374,6 +375,27 @@ def on_blend(dataset: str, za, zb, t: float):
     if za is None or zb is None:
         return None, None
     return interp_image(lm, za, zb, t), trajectory_map(dataset, za, zb, t)
+
+
+def on_traj_click(dataset: str, za, zb, evt: gr.SelectData):
+    """Click/drag on the path plot -> slide the blend point to the nearest
+    spot along the A->B line. Updates the blended image, the map, and the
+    slider so all three stay in sync."""
+    if dataset != "digits" or za is None or zb is None:
+        return gr.update(), gr.update(), gr.update()
+    lm = get_model("digits")
+    W, H = get_pad_base(lm).size
+    px, py = evt.index
+    lx = px / W * (2 * LATENT_RANGE) - LATENT_RANGE
+    ly = LATENT_RANGE - py / H * (2 * LATENT_RANGE)
+    p = torch.tensor([lx, ly], dtype=za.dtype)
+    ab = zb - za
+    denom = float(torch.dot(ab, ab))
+    t = 0.0 if denom < 1e-9 else float(torch.dot(p - za, ab) / denom)
+    t = min(max(t, 0.0), 1.0)
+    return (interp_image(lm, za, zb, t),
+            trajectory_map(dataset, za, zb, t),
+            round(t, 2))
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +466,10 @@ def build_ui() -> gr.Blocks:
                 tslider.release(
                     on_blend, [dataset, za_state, zb_state, tslider],
                     [blended, traj_map])
+                # Click/drag on the path plot to slide along it.
+                traj_map.select(
+                    on_traj_click, [dataset, za_state, zb_state],
+                    [blended, traj_map, tslider])
 
         # Initialize both tabs on load.
         def _init():
