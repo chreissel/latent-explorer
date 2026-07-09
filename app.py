@@ -123,14 +123,126 @@ def get_grid(lm: LoadedModel) -> Image.Image:
     return _GRID_CACHE[lm.name]
 
 
+# --- Class-region map ---------------------------------------------------
+# Instead of tiling decoded images (which looks like a plain image grid), we
+# colour the latent plane by *which digit class lives where*. We encode a batch
+# of labelled MNIST digits to their 2-D latent positions, fit a simple
+# per-class Gaussian (QDA), and paint each point of the plane with the colour of
+# its most likely class. Boundaries between colours are exactly the "in-between"
+# regions the user can click to explore blends of two digits.
+DIGIT_COLORS = [
+    (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40),
+    (148, 103, 189), (140, 86, 75), (227, 119, 194), (127, 127, 127),
+    (188, 189, 34), (23, 190, 207),
+]
+
+
+def _load_font(size: int):
+    from PIL import ImageFont
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+              "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+              "DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(p, size)
+        except Exception:
+            continue
+    try:
+        return ImageFont.load_default(size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def build_class_region_map(lm: LoadedModel, size: int = 560,
+                           n_fit: int = 8000) -> Image.Image:
+    """Colour the 2-D latent plane by most-likely digit class (QDA)."""
+    import data as datamod
+
+    imgs, labels = datamod.load_mnist_labeled(n=n_fit)
+    with torch.no_grad():
+        mu, _ = lm.model.encode(imgs.to(DEVICE))
+    pts = mu.cpu().numpy()
+    labels = labels.numpy()
+
+    # Per-class Gaussian parameters.
+    means, invs, logdets, logpri, classes = {}, {}, {}, {}, []
+    for c in range(10):
+        Xc = pts[labels == c]
+        if len(Xc) < 5:
+            continue
+        m = Xc.mean(0)
+        cov = np.cov(Xc.T) + np.eye(2) * 1e-3
+        means[c] = m
+        invs[c] = np.linalg.inv(cov)
+        logdets[c] = float(np.log(np.linalg.det(cov)))
+        logpri[c] = float(np.log(len(Xc) / len(pts)))
+        classes.append(c)
+
+    # Grid of latent coords over the plane (top row = high y).
+    W = H = size
+    xs = np.linspace(-LATENT_RANGE, LATENT_RANGE, W)
+    ys = np.linspace(LATENT_RANGE, -LATENT_RANGE, H)
+    gx, gy = np.meshgrid(xs, ys)
+    G = np.stack([gx.ravel(), gy.ravel()], axis=1)
+
+    scores = np.empty((len(classes), G.shape[0]), dtype=np.float64)
+    for i, c in enumerate(classes):
+        d = G - means[c]
+        q = np.einsum("pi,ij,pj->p", d, invs[c], d)
+        scores[i] = -0.5 * q - 0.5 * logdets[c] + logpri[c]
+    cls = np.array(classes)[np.argmax(scores, axis=0)].reshape(H, W)
+
+    # Paint lightened class colours so numerals/boundaries stay legible.
+    arr = np.zeros((H, W, 3), dtype=np.uint8)
+    for c in classes:
+        base = np.array(DIGIT_COLORS[c], dtype=np.float32)
+        arr[cls == c] = (base * 0.6 + 255 * 0.4).astype(np.uint8)
+
+    # Dark boundaries where the predicted class changes.
+    bound = np.zeros((H, W), dtype=bool)
+    bound[:-1, :] |= cls[:-1, :] != cls[1:, :]
+    bound[:, :-1] |= cls[:, :-1] != cls[:, 1:]
+    arr[bound] = (30, 30, 30)
+
+    img = Image.fromarray(arr, mode="RGB")
+    draw = ImageDraw.Draw(img)
+    font = _load_font(38)
+    for c in classes:
+        mx, my = means[c]
+        px = int((mx + LATENT_RANGE) / (2 * LATENT_RANGE) * W)
+        py = int((LATENT_RANGE - my) / (2 * LATENT_RANGE) * H)
+        px = min(max(px, 18), W - 18)
+        py = min(max(py, 18), H - 18)
+        for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
+            draw.text((px + ox, py + oy), str(c), fill=(0, 0, 0),
+                      font=font, anchor="mm")
+        draw.text((px, py), str(c), fill=(255, 255, 255), font=font, anchor="mm")
+    return img
+
+
+_PAD_CACHE: dict[str, Image.Image] = {}
+
+
+def get_pad_base(lm: LoadedModel) -> Image.Image:
+    """The clickable pad background: class-region map, or decoded grid if the
+    labelled MNIST cache isn't available."""
+    if lm.name not in _PAD_CACHE:
+        try:
+            _PAD_CACHE[lm.name] = build_class_region_map(lm)
+        except Exception as e:
+            print(f"class-region map unavailable ({e}); using decoded grid")
+            _PAD_CACHE[lm.name] = build_latent_grid(lm).convert("RGB")
+    return _PAD_CACHE[lm.name]
+
+
 def pad_with_marker(lm: LoadedModel, lx: float, ly: float) -> Image.Image:
     """Latent map (RGB) with a crosshair drawn at latent coord (lx, ly)."""
-    grid = get_grid(lm).convert("RGB")
+    grid = get_pad_base(lm).copy()
     W, H = grid.size
     px = int((lx + LATENT_RANGE) / (2 * LATENT_RANGE) * W)
     py = int((LATENT_RANGE - ly) / (2 * LATENT_RANGE) * H)
     d = ImageDraw.Draw(grid)
-    r = 10
+    r = 11
+    d.ellipse([px - r, py - r, px + r, py + r], outline=(255, 255, 255), width=5)
     d.line([(px - r, py), (px + r, py)], fill=(255, 60, 60), width=3)
     d.line([(px, py - r), (px, py + r)], fill=(255, 60, 60), width=3)
     d.ellipse([px - r, py - r, px + r, py + r], outline=(255, 60, 60), width=3)
@@ -148,7 +260,7 @@ def digit_from_latent(lx: float, ly: float):
 
 def on_pad_click(evt: gr.SelectData):
     lm = get_model("digits")
-    grid = get_grid(lm)
+    grid = get_pad_base(lm)
     W, H = grid.size
     px, py = evt.index  # pixel coords on the displayed pad
     lx = px / W * (2 * LATENT_RANGE) - LATENT_RANGE
@@ -195,13 +307,10 @@ def on_dataset_change(dataset: str):
 # ---------------------------------------------------------------------------
 # Interface
 # ---------------------------------------------------------------------------
-HEADLINE = "<h1 style='text-align:center;font-size:3rem;margin:0.4em 0'>Image generation</h1>"
-
-
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Image generation", theme=gr.themes.Soft(
             font=[gr.themes.GoogleFont("Inter"), "sans-serif"])) as demo:
-        gr.HTML(HEADLINE)
+        gr.Markdown("# Image generation")
 
         with gr.Tabs():
             # --- Digit Explorer ---------------------------------------
@@ -213,11 +322,11 @@ def build_ui() -> gr.Blocks:
                     out_digit = gr.Image(label="Generated Image", height=480,
                                          show_download_button=False)
                 coord_lbl = gr.Markdown()
-                with gr.Row():
-                    sx = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
-                                   step=0.05, label="latent X")
-                    sy = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
-                                   step=0.05, label="latent Y")
+                # X and Y sliders stacked vertically (below each other).
+                sx = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
+                               step=0.05, label="latent X")
+                sy = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
+                               step=0.05, label="latent Y")
 
                 pad.select(on_pad_click, None,
                            [out_digit, pad, coord_lbl, sx, sy])

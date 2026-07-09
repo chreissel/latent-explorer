@@ -47,6 +47,23 @@ def load_mnist(train: bool = True) -> torch.Tensor:
     return x
 
 
+def load_mnist_labeled(n: int | None = None, train: bool = True):
+    """Return (images, labels): images (N,1,28,28) in [0,1], labels (N,) 0-9.
+
+    Uses the local cache only (download=False) so it works fully offline at the
+    booth. Raises if MNIST hasn't been downloaded yet (train.py fetches it).
+    """
+    from torchvision import datasets
+
+    ds = datasets.MNIST(root=DATA_DIR, train=train, download=False)
+    x = ds.data.float().unsqueeze(1) / 255.0
+    y = ds.targets.clone()
+    if n is not None and n < x.size(0):
+        idx = torch.randperm(x.size(0))[:n]
+        x, y = x[idx], y[idx]
+    return x, y
+
+
 # --- Galaxy10 ------------------------------------------------------------
 def download_galaxy10() -> str:
     """Download the Galaxy10 .h5 to ./data if not already cached."""
