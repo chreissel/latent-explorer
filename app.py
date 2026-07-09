@@ -153,8 +153,14 @@ def _load_font(size: int):
 
 
 def build_class_region_map(lm: LoadedModel, size: int = 560,
-                           n_fit: int = 8000) -> Image.Image:
-    """Colour the 2-D latent plane by most-likely digit class (QDA)."""
+                           n_fit: int = 8000, spread: float = 1.5) -> Image.Image:
+    """Soft class-density map of the 2-D latent plane.
+
+    Each digit class becomes a Gaussian "cloud" of its colour, dense where lots
+    of that digit's images land and fading to white further out. Colours blend
+    in the overlaps (the "in-between" regions) instead of meeting at hard
+    borders, so the pad reads as a heat-map of where each number lives.
+    """
     import data as datamod
 
     imgs, labels = datamod.load_mnist_labeled(n=n_fit)
@@ -163,18 +169,15 @@ def build_class_region_map(lm: LoadedModel, size: int = 560,
     pts = mu.cpu().numpy()
     labels = labels.numpy()
 
-    # Per-class Gaussian parameters.
-    means, invs, logdets, logpri, classes = {}, {}, {}, {}, []
+    # Per-class Gaussian (mean + slightly inflated covariance for a soft fade).
+    means, invs, classes = {}, {}, []
     for c in range(10):
         Xc = pts[labels == c]
         if len(Xc) < 5:
             continue
-        m = Xc.mean(0)
-        cov = np.cov(Xc.T) + np.eye(2) * 1e-3
-        means[c] = m
+        cov = (np.cov(Xc.T) + np.eye(2) * 1e-2) * spread
+        means[c] = Xc.mean(0)
         invs[c] = np.linalg.inv(cov)
-        logdets[c] = float(np.log(np.linalg.det(cov)))
-        logpri[c] = float(np.log(len(Xc) / len(pts)))
         classes.append(c)
 
     # Grid of latent coords over the plane (top row = high y).
@@ -184,38 +187,37 @@ def build_class_region_map(lm: LoadedModel, size: int = 560,
     gx, gy = np.meshgrid(xs, ys)
     G = np.stack([gx.ravel(), gy.ravel()], axis=1)
 
-    scores = np.empty((len(classes), G.shape[0]), dtype=np.float64)
+    # Each class weight peaks at 1 at its mean and decays with distance.
+    Wc = np.empty((len(classes), G.shape[0]), dtype=np.float64)
     for i, c in enumerate(classes):
         d = G - means[c]
-        q = np.einsum("pi,ij,pj->p", d, invs[c], d)
-        scores[i] = -0.5 * q - 0.5 * logdets[c] + logpri[c]
-    cls = np.array(classes)[np.argmax(scores, axis=0)].reshape(H, W)
+        Wc[i] = np.exp(-0.5 * np.einsum("pi,ij,pj->p", d, invs[c], d))
 
-    # Paint lightened class colours so numerals/boundaries stay legible.
-    arr = np.zeros((H, W, 3), dtype=np.uint8)
-    for c in classes:
-        base = np.array(DIGIT_COLORS[c], dtype=np.float32)
-        arr[cls == c] = (base * 0.6 + 255 * 0.4).astype(np.uint8)
-
-    # Dark boundaries where the predicted class changes.
-    bound = np.zeros((H, W), dtype=bool)
-    bound[:-1, :] |= cls[:-1, :] != cls[1:, :]
-    bound[:, :-1] |= cls[:, :-1] != cls[:, 1:]
-    arr[bound] = (30, 30, 30)
+    colors = np.array([DIGIT_COLORS[c] for c in classes], dtype=np.float64)
+    wsum = Wc.sum(0) + 1e-8
+    blended = (Wc.T @ colors) / wsum[:, None]           # colour mix per pixel
+    alpha = np.clip(Wc.max(0), 0.0, 1.0) ** 0.8         # density -> opacity
+    white = np.array([250.0, 250.0, 250.0])
+    px_col = white[None, :] * (1 - alpha[:, None]) + blended * alpha[:, None]
+    arr = np.clip(px_col, 0, 255).astype(np.uint8).reshape(H, W, 3)
 
     img = Image.fromarray(arr, mode="RGB")
     draw = ImageDraw.Draw(img)
-    font = _load_font(38)
+    font = _load_font(42)
     for c in classes:
         mx, my = means[c]
         px = int((mx + LATENT_RANGE) / (2 * LATENT_RANGE) * W)
         py = int((LATENT_RANGE - my) / (2 * LATENT_RANGE) * H)
-        px = min(max(px, 18), W - 18)
-        py = min(max(py, 18), H - 18)
-        for ox, oy in ((-2, 0), (2, 0), (0, -2), (0, 2)):
-            draw.text((px + ox, py + oy), str(c), fill=(0, 0, 0),
+        px = min(max(px, 22), W - 22)
+        py = min(max(py, 22), H - 22)
+        # Numeral in the class colour but deeper/more saturated, with a soft
+        # light halo so it stays readable over both vivid cores and faded edges.
+        deep = tuple(int(ch * 0.55) for ch in DIGIT_COLORS[c])
+        for ox, oy in ((-2, -2), (2, -2), (-2, 2), (2, 2),
+                       (-2, 0), (2, 0), (0, -2), (0, 2)):
+            draw.text((px + ox, py + oy), str(c), fill=(255, 255, 255),
                       font=font, anchor="mm")
-        draw.text((px, py), str(c), fill=(255, 255, 255), font=font, anchor="mm")
+        draw.text((px, py), str(c), fill=deep, font=font, anchor="mm")
     return img
 
 
@@ -255,7 +257,8 @@ def digit_from_latent(lx: float, ly: float):
     img = decode(lm, z)
     return (tensor_to_pil(img, BIG, smooth=False),
             pad_with_marker(lm, lx, ly),
-            f"latent = ({lx:+.2f}, {ly:+.2f})")
+            f"<div style='font-size:1.35rem;font-weight:700'>"
+            f"input = ({lx:+.2f}, {ly:+.2f})</div>")
 
 
 def on_pad_click(evt: gr.SelectData):
@@ -315,18 +318,21 @@ def build_ui() -> gr.Blocks:
         with gr.Tabs():
             # --- Digit Explorer ---------------------------------------
             with gr.Tab("✏️  Image generation"):
-                with gr.Row():
-                    pad = gr.Image(label="Input — tap to explore",
-                                   interactive=False, height=480,
-                                   show_download_button=False)
-                    out_digit = gr.Image(label="Generated Image", height=480,
-                                         show_download_button=False)
-                coord_lbl = gr.Markdown()
-                # X and Y sliders stacked vertically (below each other).
-                sx = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
-                               step=0.05, label="latent X")
-                sy = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
-                               step=0.05, label="latent Y")
+                with gr.Row(equal_height=False):
+                    # Left column: input pad + sliders + readout (all share the
+                    # pad's width, so the sliders match the left plot's length).
+                    with gr.Column():
+                        pad = gr.Image(label="Input — tap to explore",
+                                       interactive=False, height=480,
+                                       show_download_button=False)
+                        sx = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
+                                       step=0.05, label="latent X")
+                        sy = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
+                                       step=0.05, label="latent Y")
+                        coord_lbl = gr.Markdown()
+                    with gr.Column():
+                        out_digit = gr.Image(label="Generated Image", height=480,
+                                             show_download_button=False)
 
                 pad.select(on_pad_click, None,
                            [out_digit, pad, coord_lbl, sx, sy])
