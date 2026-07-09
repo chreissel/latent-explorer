@@ -278,7 +278,7 @@ def digit_from_latent(lx: float, ly: float):
     img = decode(lm, z)
     return (tensor_to_pil(img, BIG, smooth=False),
             pad_with_marker(lm, lx, ly),
-            f"<div style='font-size:1.35rem;font-weight:700'>"
+            f"<div style='font-size:1.7rem;font-weight:700;text-align:center'>"
             f"input = ({lx:+.2f}, {ly:+.2f})</div>")
 
 
@@ -403,7 +403,8 @@ def on_traj_click(dataset: str, za, zb, evt: gr.SelectData):
 # ---------------------------------------------------------------------------
 def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Image generation", theme=gr.themes.Soft(
-            font=[gr.themes.GoogleFont("Inter"), "sans-serif"])) as demo:
+            font=[gr.themes.GoogleFont("Inter"), "sans-serif"],
+            text_size=gr.themes.sizes.text_lg)) as demo:
         gr.Markdown("# Image generation")
 
         with gr.Tabs():
@@ -413,6 +414,7 @@ def build_ui() -> gr.Blocks:
                     # Left column: input pad + sliders + readout (all share the
                     # pad's width, so the sliders match the left plot's length).
                     with gr.Column():
+                        coord_lbl = gr.Markdown()
                         pad = gr.Image(label="Input — tap to explore",
                                        interactive=False, height=480,
                                        show_download_button=False)
@@ -420,7 +422,6 @@ def build_ui() -> gr.Blocks:
                                        step=0.05, label="latent X")
                         sy = gr.Slider(-LATENT_RANGE, LATENT_RANGE, value=0.0,
                                        step=0.05, label="latent Y")
-                        coord_lbl = gr.Markdown()
                     with gr.Column():
                         out_digit = gr.Image(label="Generated Image", height=480,
                                              show_download_button=False)
