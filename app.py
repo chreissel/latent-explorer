@@ -296,7 +296,45 @@ def on_pad_click(evt: gr.SelectData):
 # ---------------------------------------------------------------------------
 # Morph / Interpolation (both datasets)
 # ---------------------------------------------------------------------------
-def random_endpoints(dataset: str):
+def _latent_to_px(z, W: int, H: int) -> tuple[float, float]:
+    x, y = float(z[0]), float(z[1])
+    px = (x + LATENT_RANGE) / (2 * LATENT_RANGE) * W
+    py = (LATENT_RANGE - y) / (2 * LATENT_RANGE) * H
+    return px, py
+
+
+def trajectory_map(dataset: str, za, zb, t: float):
+    """Draw the morph path A->B on the digit latent map, with the current
+    interpolation point marked. Only meaningful for the 2-D digit latent space;
+    galaxies (24-D) have no 2-D plane to plot, so this returns None.
+    """
+    if dataset != "digits" or za is None or zb is None:
+        return None
+    lm = get_model("digits")
+    base = get_pad_base(lm).copy()
+    W, H = base.size
+    ax, ay = _latent_to_px(za, W, H)
+    bx, by = _latent_to_px(zb, W, H)
+    cx, cy = _latent_to_px((1 - t) * za + t * zb, W, H)
+    d = ImageDraw.Draw(base)
+    # Path between the two endpoints.
+    d.line([(ax, ay), (bx, by)], fill=(255, 255, 255), width=6)
+    d.line([(ax, ay), (bx, by)], fill=(25, 25, 25), width=3)
+    font = _load_font(20)
+    for (x, y), lab in (((ax, ay), "A"), ((bx, by), "B")):
+        r = 14
+        d.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255),
+                  outline=(25, 25, 25), width=3)
+        d.text((x, y), lab, fill=(25, 25, 25), font=font, anchor="mm")
+    # Current position along the path.
+    r = 12
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 255, 255), width=5)
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 60, 60), width=3)
+    return base
+
+
+def _fresh_endpoints(dataset: str):
+    """New random endpoints + all Morphing-tab outputs (incl. trajectory map)."""
     lm = get_model(dataset)
     n = lm.sample_bank.size(0)
     ia, ib = np.random.choice(n, size=2, replace=False)
@@ -306,7 +344,14 @@ def random_endpoints(dataset: str):
     thumb_a = tensor_to_pil(lm.sample_bank[ia], THUMB, smooth)
     thumb_b = tensor_to_pil(lm.sample_bank[ib], THUMB, smooth)
     blended = interp_image(lm, za, zb, 0.5)
-    return za, zb, thumb_a, thumb_b, blended, 0.5
+    traj = gr.update(value=trajectory_map(dataset, za, zb, 0.5),
+                     visible=(dataset == "digits"))
+    return za, zb, thumb_a, thumb_b, blended, traj, 0.5
+
+
+# random-endpoints button and dataset switch share the same behaviour.
+random_endpoints = _fresh_endpoints
+on_dataset_change = _fresh_endpoints
 
 
 def interp_image(lm: LoadedModel, za: torch.Tensor, zb: torch.Tensor, t: float):
@@ -318,14 +363,8 @@ def interp_image(lm: LoadedModel, za: torch.Tensor, zb: torch.Tensor, t: float):
 def on_blend(dataset: str, za, zb, t: float):
     lm = get_model(dataset)
     if za is None or zb is None:
-        return None
-    return interp_image(lm, za, zb, t)
-
-
-def on_dataset_change(dataset: str):
-    # Fresh endpoints whenever the dataset switches.
-    za, zb, ta, tb, blended, t = random_endpoints(dataset)
-    return za, zb, ta, tb, blended, t
+        return None, None
+    return interp_image(lm, za, zb, t), trajectory_map(dataset, za, zb, t)
 
 
 # ---------------------------------------------------------------------------
@@ -366,41 +405,47 @@ def build_ui() -> gr.Blocks:
                 dataset = gr.Radio(
                     choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
                     value="digits", label="Dataset")
-                with gr.Row():
-                    thumb_a = gr.Image(label="Start", height=THUMB + 40,
-                                       interactive=False,
-                                       show_download_button=False)
-                    blended = gr.Image(label="Blend", height=BIG,
-                                       show_download_button=False)
-                    thumb_b = gr.Image(label="End", height=THUMB + 40,
-                                       interactive=False,
-                                       show_download_button=False)
-                tslider = gr.Slider(0.0, 1.0, value=0.5, step=0.02,
-                                    label="◀ Start  —  blend  —  End ▶")
-                randomize = gr.Button("🎲  Randomize endpoints", variant="primary",
-                                      size="lg")
+                with gr.Row(equal_height=False):
+                    # Digit-only: the morph path drawn on the latent map.
+                    traj_map = gr.Image(label="Path through latent space",
+                                        height=BIG, interactive=False,
+                                        show_download_button=False)
+                    with gr.Column():
+                        with gr.Row():
+                            thumb_a = gr.Image(label="Start", height=THUMB + 40,
+                                               interactive=False,
+                                               show_download_button=False)
+                            blended = gr.Image(label="Blend", height=BIG,
+                                               show_download_button=False)
+                            thumb_b = gr.Image(label="End", height=THUMB + 40,
+                                               interactive=False,
+                                               show_download_button=False)
+                        tslider = gr.Slider(0.0, 1.0, value=0.5, step=0.02,
+                                            label="◀ Start  —  blend  —  End ▶")
+                        randomize = gr.Button("🎲  Randomize endpoints",
+                                              variant="primary", size="lg")
 
                 za_state = gr.State()
                 zb_state = gr.State()
 
-                randomize.click(
-                    random_endpoints, [dataset],
-                    [za_state, zb_state, thumb_a, thumb_b, blended, tslider])
-                dataset.change(
-                    on_dataset_change, [dataset],
-                    [za_state, zb_state, thumb_a, thumb_b, blended, tslider])
+                morph_out = [za_state, zb_state, thumb_a, thumb_b, blended,
+                             traj_map, tslider]
+                randomize.click(random_endpoints, [dataset], morph_out)
+                dataset.change(on_dataset_change, [dataset], morph_out)
                 tslider.release(
-                    on_blend, [dataset, za_state, zb_state, tslider], [blended])
+                    on_blend, [dataset, za_state, zb_state, tslider],
+                    [blended, traj_map])
 
         # Initialize both tabs on load.
         def _init():
             d_img, d_pad, d_lbl = digit_from_latent(0.0, 0.0)
-            za, zb, ta, tb, bl, t = random_endpoints("digits")
-            return d_img, d_pad, d_lbl, za, zb, ta, tb, bl, t
+            za, zb, ta, tb, bl, traj, t = random_endpoints("digits")
+            return d_img, d_pad, d_lbl, za, zb, ta, tb, bl, traj, t
 
         demo.load(_init, None,
                   [out_digit, pad, coord_lbl,
-                   za_state, zb_state, thumb_a, thumb_b, blended, tslider])
+                   za_state, zb_state, thumb_a, thumb_b, blended,
+                   traj_map, tslider])
 
     return demo
 
