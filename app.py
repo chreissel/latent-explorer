@@ -152,8 +152,8 @@ def _load_font(size: int):
         return ImageFont.load_default()
 
 
-def build_class_region_map(lm: LoadedModel, size: int = 560,
-                           n_fit: int = 8000, spread: float = 1.5) -> Image.Image:
+def build_class_region_map(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
+                           spread: float = 0.6, fade: float = 1.6) -> Image.Image:
     """Soft class-density map of the 2-D latent plane.
 
     Each digit class becomes a Gaussian "cloud" of its colour, dense where lots
@@ -196,7 +196,7 @@ def build_class_region_map(lm: LoadedModel, size: int = 560,
     colors = np.array([DIGIT_COLORS[c] for c in classes], dtype=np.float64)
     wsum = Wc.sum(0) + 1e-8
     blended = (Wc.T @ colors) / wsum[:, None]           # colour mix per pixel
-    alpha = np.clip(Wc.max(0), 0.0, 1.0) ** 0.8         # density -> opacity
+    alpha = np.clip(Wc.max(0), 0.0, 1.0) ** fade        # density -> opacity
     white = np.array([250.0, 250.0, 250.0])
     px_col = white[None, :] * (1 - alpha[:, None]) + blended * alpha[:, None]
     arr = np.clip(px_col, 0, 255).astype(np.uint8).reshape(H, W, 3)
