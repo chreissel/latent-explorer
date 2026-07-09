@@ -152,14 +152,14 @@ def _load_font(size: int):
         return ImageFont.load_default()
 
 
-def build_class_region_map(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
-                           spread: float = 0.6, fade: float = 1.6) -> Image.Image:
-    """Soft class-density map of the 2-D latent plane.
+def _compute_clouds(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
+                    spread: float = 0.6, fade: float = 1.6):
+    """Soft class-density background (no numerals) + de-collided label spots.
 
     Each digit class becomes a Gaussian "cloud" of its colour, dense where lots
-    of that digit's images land and fading to white further out. Colours blend
-    in the overlaps (the "in-between" regions) instead of meeting at hard
-    borders, so the pad reads as a heat-map of where each number lives.
+    of that digit's images land and fading to white further out. Returns the
+    numeral-free cloud image plus a list of (px, py, class) label positions, so
+    numerals can be drawn crisply on top afterwards (even over a blurred copy).
     """
     import data as datamod
 
@@ -200,10 +200,7 @@ def build_class_region_map(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
     white = np.array([250.0, 250.0, 250.0])
     px_col = white[None, :] * (1 - alpha[:, None]) + blended * alpha[:, None]
     arr = np.clip(px_col, 0, 255).astype(np.uint8).reshape(H, W, 3)
-
-    img = Image.fromarray(arr, mode="RGB")
-    draw = ImageDraw.Draw(img)
-    font = _load_font(42)
+    clouds = Image.fromarray(arr, mode="RGB")
 
     # Numeral positions (pixels). Classes like 4 & 9 sit almost on top of each
     # other in latent space, so we nudge only the *labels* apart (leaving the
@@ -229,10 +226,16 @@ def build_class_region_map(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
             break
     pos[:, 0] = np.clip(pos[:, 0], 22, W - 22)
     pos[:, 1] = np.clip(pos[:, 1], 22, H - 22)
+    label_spots = [(float(px), float(py), c)
+                   for (px, py), c in zip(pos, classes)]
+    return clouds, label_spots
 
-    for (px, py), c in zip(pos, classes):
-        # Numeral in the class colour but deeper/more saturated, with a soft
-        # light halo so it stays readable over both vivid cores and faded edges.
+
+def _draw_numerals(img: Image.Image, label_spots, size: int = 44) -> Image.Image:
+    """Draw class numerals (crisply) on img: deep same-hue colour + light halo."""
+    draw = ImageDraw.Draw(img)
+    font = _load_font(size)
+    for px, py, c in label_spots:
         deep = tuple(int(ch * 0.55) for ch in DIGIT_COLORS[c])
         for ox, oy in ((-2, -2), (2, -2), (-2, 2), (2, 2),
                        (-2, 0), (2, 0), (0, -2), (0, 2)):
@@ -240,6 +243,22 @@ def build_class_region_map(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
                       font=font, anchor="mm")
         draw.text((px, py), str(c), fill=deep, font=font, anchor="mm")
     return img
+
+
+_CLOUDS_CACHE: dict[str, tuple] = {}
+
+
+def get_clouds(lm: LoadedModel):
+    """Cached (numeral-free cloud image, label spots) for the digit latent map."""
+    if lm.name not in _CLOUDS_CACHE:
+        _CLOUDS_CACHE[lm.name] = _compute_clouds(lm)
+    return _CLOUDS_CACHE[lm.name]
+
+
+def build_class_region_map(lm: LoadedModel) -> Image.Image:
+    """Full latent map: colour clouds with crisp class numerals on top."""
+    clouds, label_spots = get_clouds(lm)
+    return _draw_numerals(clouds.copy(), label_spots)
 
 
 _PAD_CACHE: dict[str, Image.Image] = {}
@@ -311,11 +330,16 @@ def trajectory_map(dataset: str, za, zb, t: float):
     if dataset != "digits" or za is None or zb is None:
         return None
     lm = get_model("digits")
-    base = get_pad_base(lm).copy()
-    # Gently soften + lighten the map so the path pops but the numerals stay
-    # readable.
-    base = base.filter(ImageFilter.GaussianBlur(radius=3))
-    base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)), 0.25)
+    try:
+        clouds, label_spots = get_clouds(lm)
+        # Gently soften + lighten only the colour clouds, then draw the numerals
+        # crisply on top so they stay easy to read.
+        base = clouds.filter(ImageFilter.GaussianBlur(radius=2))
+        base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)),
+                           0.15)
+        _draw_numerals(base, label_spots)
+    except Exception:
+        base = get_pad_base(lm).copy()
 
     W, H = base.size
     ax, ay = _latent_to_px(za, W, H)
@@ -464,13 +488,15 @@ def build_ui() -> gr.Blocks:
                              traj_map, tslider]
                 randomize.click(random_endpoints, [dataset], morph_out)
                 dataset.change(on_dataset_change, [dataset], morph_out)
-                tslider.release(
+                # .input fires live while dragging, so the red dot slides along
+                # the path in real time (not just on release).
+                tslider.input(
                     on_blend, [dataset, za_state, zb_state, tslider],
-                    [blended, traj_map])
-                # Click/drag on the path plot to slide along it.
+                    [blended, traj_map], show_progress="hidden")
+                # Click on the path plot to jump the dot to that point.
                 traj_map.select(
                     on_traj_click, [dataset, za_state, zb_state],
-                    [blended, traj_map, tslider])
+                    [blended, traj_map, tslider], show_progress="hidden")
 
         # Initialize both tabs on load.
         def _init():
