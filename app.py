@@ -19,7 +19,7 @@ import os
 import gradio as gr
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 from vae import MODEL_CONFIGS, build_vae
 
@@ -312,24 +312,33 @@ def trajectory_map(dataset: str, za, zb, t: float):
         return None
     lm = get_model("digits")
     base = get_pad_base(lm).copy()
+    # Blur + fade the map into a soft backdrop so the path pops.
+    base = base.filter(ImageFilter.GaussianBlur(radius=10))
+    base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)), 0.45)
+
     W, H = base.size
     ax, ay = _latent_to_px(za, W, H)
     bx, by = _latent_to_px(zb, W, H)
     cx, cy = _latent_to_px((1 - t) * za + t * zb, W, H)
     d = ImageDraw.Draw(base)
-    # Path between the two endpoints.
-    d.line([(ax, ay), (bx, by)], fill=(255, 255, 255), width=6)
-    d.line([(ax, ay), (bx, by)], fill=(25, 25, 25), width=3)
-    font = _load_font(20)
-    for (x, y), lab in (((ax, ay), "A"), ((bx, by), "B")):
-        r = 14
-        d.ellipse([x - r, y - r, x + r, y + r], fill=(255, 255, 255),
-                  outline=(25, 25, 25), width=3)
-        d.text((x, y), lab, fill=(25, 25, 25), font=font, anchor="mm")
-    # Current position along the path.
-    r = 12
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 255, 255), width=5)
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(255, 60, 60), width=3)
+
+    # Bold path: black casing with a bright red core.
+    d.line([(ax, ay), (bx, by)], fill=(10, 10, 10), width=10)
+    d.line([(ax, ay), (bx, by)], fill=(230, 30, 30), width=4)
+
+    # Endpoints: plain black dots (no A/B labels).
+    for x, y in ((ax, ay), (bx, by)):
+        r = 12
+        d.ellipse([x - r - 2, y - r - 2, x + r + 2, y + r + 2],
+                  fill=(255, 255, 255))
+        d.ellipse([x - r, y - r, x + r, y + r], fill=(10, 10, 10))
+
+    # Current position along the path: bright red dot, black-ringed.
+    r = 16
+    d.ellipse([cx - r - 3, cy - r - 3, cx + r + 3, cy + r + 3],
+              fill=(255, 255, 255))
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(230, 30, 30),
+              outline=(10, 10, 10), width=4)
     return base
 
 
