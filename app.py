@@ -204,12 +204,33 @@ def build_class_region_map(lm: LoadedModel, size: int = 560, n_fit: int = 8000,
     img = Image.fromarray(arr, mode="RGB")
     draw = ImageDraw.Draw(img)
     font = _load_font(42)
-    for c in classes:
-        mx, my = means[c]
-        px = int((mx + LATENT_RANGE) / (2 * LATENT_RANGE) * W)
-        py = int((LATENT_RANGE - my) / (2 * LATENT_RANGE) * H)
-        px = min(max(px, 22), W - 22)
-        py = min(max(py, 22), H - 22)
+
+    # Numeral positions (pixels). Classes like 4 & 9 sit almost on top of each
+    # other in latent space, so we nudge only the *labels* apart (leaving the
+    # colour clouds truthful) until each numeral is individually readable.
+    pos = np.array([
+        [(means[c][0] + LATENT_RANGE) / (2 * LATENT_RANGE) * W,
+         (LATENT_RANGE - means[c][1]) / (2 * LATENT_RANGE) * H]
+        for c in classes], dtype=float)
+    min_dist = 46.0
+    for _ in range(120):
+        moved = False
+        for i in range(len(pos)):
+            for j in range(i + 1, len(pos)):
+                d = pos[i] - pos[j]
+                dist = float(np.hypot(d[0], d[1]))
+                if dist < min_dist:
+                    u = (d / dist) if dist > 1e-6 else np.array([1.0, 0.0])
+                    shift = (min_dist - max(dist, 1e-6)) / 2.0
+                    pos[i] += u * shift
+                    pos[j] -= u * shift
+                    moved = True
+        if not moved:
+            break
+    pos[:, 0] = np.clip(pos[:, 0], 22, W - 22)
+    pos[:, 1] = np.clip(pos[:, 1], 22, H - 22)
+
+    for (px, py), c in zip(pos, classes):
         # Numeral in the class colour but deeper/more saturated, with a soft
         # light halo so it stays readable over both vivid cores and faded edges.
         deep = tuple(int(ch * 0.55) for ch in DIGIT_COLORS[c])
