@@ -50,12 +50,13 @@ def load_mnist(train: bool = True) -> torch.Tensor:
 def load_mnist_labeled(n: int | None = None, train: bool = True):
     """Return (images, labels): images (N,1,28,28) in [0,1], labels (N,) 0-9.
 
-    Uses the local cache only (download=False) so it works fully offline at the
-    booth. Raises if MNIST hasn't been downloaded yet (train.py fetches it).
+    Loads from the DATA_DIR cache (set LATENT_DATA_DIR to point at an existing
+    copy); downloads MNIST there if it isn't already present so the class-region
+    map still builds even when the cache lives elsewhere.
     """
     from torchvision import datasets
 
-    ds = datasets.MNIST(root=DATA_DIR, train=train, download=False)
+    ds = datasets.MNIST(root=DATA_DIR, train=train, download=True)
     x = ds.data.float().unsqueeze(1) / 255.0
     y = ds.targets.clone()
     if n is not None and n < x.size(0):
