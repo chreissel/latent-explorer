@@ -481,8 +481,9 @@ button.svelte-1ixn6qd, .tab-nav button, button[role="tab"] {
 }
 .gradio-container h1 { font-size: 2.6rem !important; font-weight: 800; }
 label span, .label-wrap span, span[data-testid] { font-size: 1.15rem !important; }
-/* Hide the numeric value box on sliders (the big numbers). */
+/* Hide the numeric value box and the min/max range labels on sliders. */
 .gradio-container input[type="number"] { display: none !important; }
+.gradio-container .min_value, .gradio-container .max_value { display: none !important; }
 """
 
 
