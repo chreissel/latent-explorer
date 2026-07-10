@@ -183,7 +183,8 @@ def px_to_coord(px, py, xr, yr, W, H):
     return px / W * (2 * xr) - xr, yr - py / H * (2 * yr)
 
 
-def _clouds_from_points(P, labels, size, xr, yr, spread=0.6, fade=1.6):
+def _clouds_from_points(P, labels, size, xr, yr, spread=0.6, fade=1.6,
+                        min_dist=46.0):
     """Soft class-density image (no numerals) + de-collided label spots for a
     set of 2-D points P with integer class labels."""
     classes, means, invs = [], {}, {}
@@ -221,8 +222,7 @@ def _clouds_from_points(P, labels, size, xr, yr, spread=0.6, fade=1.6):
     # Label positions (pixels), nudged apart so overlapping classes stay legible.
     pos = np.array([list(coord_to_px(means[c][0], means[c][1], xr, yr, W, H))
                     for c in classes], dtype=float)
-    min_dist = 46.0
-    for _ in range(120):
+    for _ in range(150):
         moved = False
         for i in range(len(pos)):
             for j in range(i + 1, len(pos)):
@@ -257,6 +257,24 @@ def _draw_numerals(img: Image.Image, label_spots, size: int = 44) -> Image.Image
     return img
 
 
+def _draw_labels(img: Image.Image, m: dict) -> Image.Image:
+    """Mark each class on the map. Digits get their numeral; galaxies (where the
+    class index is meaningless) get a small example image from that class."""
+    if not m.get("examples"):
+        return _draw_numerals(img, m["labels"])
+    draw = ImageDraw.Draw(img)
+    for px, py, c in m["labels"]:
+        thumb = m["examples"].get(c)
+        if thumb is None:
+            continue
+        s = thumb.size[0]
+        x0, y0 = int(px - s / 2), int(py - s / 2)
+        img.paste(thumb, (x0, y0))
+        draw.rectangle([x0 - 2, y0 - 2, x0 + s + 1, y0 + s + 1],
+                       outline=(20, 20, 20), width=3)
+    return img
+
+
 _MAP_CACHE: dict[str, dict] = {}
 
 
@@ -269,6 +287,7 @@ def get_map(lm: LoadedModel) -> dict:
         imgs, labels = datamod.load_labeled(lm.name, n=8000)
         Z = _encode_all(lm, imgs)
         labels = np.asarray(labels)
+        use_thumbs = lm.channels == 3            # galaxies: show example images
         if Z.shape[1] == 2:
             mean, comp = np.zeros(2), np.eye(2)
             xr = yr = LATENT_RANGE
@@ -281,9 +300,22 @@ def get_map(lm: LoadedModel) -> dict:
             P = Zc @ comp.T
             xr = float(np.percentile(np.abs(P[:, 0]), 98)) * 1.15 + 1e-6
             yr = float(np.percentile(np.abs(P[:, 1]), 98)) * 1.15 + 1e-6
-        clouds, label_spots = _clouds_from_points(P, labels, 560, xr, yr)
+        clouds, label_spots = _clouds_from_points(
+            P, labels, 560, xr, yr, min_dist=72.0 if use_thumbs else 46.0)
+
+        examples = {}
+        if use_thumbs:
+            # A representative image per class: the one nearest the class centre.
+            for _, _, c in label_spots:
+                mask = labels == c
+                idxs = np.where(mask)[0]
+                cmean = P[mask].mean(0)
+                j = idxs[np.argmin(((P[mask] - cmean) ** 2).sum(1))]
+                examples[c] = tensor_to_pil(imgs[j], 60, smooth=True)
+
         _MAP_CACHE[lm.name] = {"mean": mean, "comp": comp, "xr": xr, "yr": yr,
-                               "clouds": clouds, "labels": label_spots}
+                               "clouds": clouds, "labels": label_spots,
+                               "examples": examples}
     return _MAP_CACHE[lm.name]
 
 
@@ -294,7 +326,7 @@ def get_pad_base(lm: LoadedModel) -> Image.Image:
     """Full latent map image: colour clouds with crisp numerals on top."""
     if lm.name not in _PAD_CACHE:
         m = get_map(lm)
-        _PAD_CACHE[lm.name] = _draw_numerals(m["clouds"].copy(), m["labels"])
+        _PAD_CACHE[lm.name] = _draw_labels(m["clouds"].copy(), m)
     return _PAD_CACHE[lm.name]
 
 
@@ -367,7 +399,7 @@ def trajectory_map(dataset: str, za, zb, t: float):
     m = get_map(lm)
     base = m["clouds"].filter(ImageFilter.GaussianBlur(radius=2))
     base = Image.blend(base, Image.new("RGB", base.size, (255, 255, 255)), 0.15)
-    _draw_numerals(base, m["labels"])
+    _draw_labels(base, m)
     W, H = base.size
     a2, b2 = proj_to2d(m, za.numpy()), proj_to2d(m, zb.numpy())
     c2 = (1 - t) * a2 + t * b2
@@ -449,6 +481,8 @@ button.svelte-1ixn6qd, .tab-nav button, button[role="tab"] {
 }
 .gradio-container h1 { font-size: 2.6rem !important; font-weight: 800; }
 label span, .label-wrap span, span[data-testid] { font-size: 1.15rem !important; }
+/* Hide the numeric value box on sliders (the big numbers). */
+.gradio-container input[type="number"] { display: none !important; }
 """
 
 
