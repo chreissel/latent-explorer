@@ -4,12 +4,12 @@ latent-explorer booth app.
 Loads the two trained VAEs and launches a touch-friendly Gradio interface for a
 science-fair booth. Runs fully offline once the weights exist in ./models.
 
-Two ways to play:
-  * Digit Explorer  -- click anywhere on the 2D latent "map" and watch the digit
-                       the model imagines at that spot. The whole map is shown as
-                       one big grid: every digit the model can dream up.
-  * Morph / Blend   -- pick two real images (digits or galaxies) and slide to
-                       blend smoothly from one into the other through latent space.
+Two ways to play, for two datasets (handwritten digits and LIGO "Gravity Spy"
+glitch spectrograms):
+  * Image generation -- click anywhere on the 2D latent "map" and watch the
+                        image the model imagines at that spot.
+  * Morphing         -- pick two real samples and slide to blend smoothly from
+                        one into the other, following the path through the map.
 """
 
 from __future__ import annotations
@@ -56,6 +56,8 @@ class LoadedModel:
         self.channels = config["img_channels"]
         self.size = config["img_size"]
         self.latent_dim = config["latent_dim"]
+        self.colormap = config.get("colormap")   # e.g. "viridis" for gravityspy
+        self.smooth = name != "digits"            # crisp pixels only for digits
 
 
 MODELS: dict[str, LoadedModel] = {}
@@ -70,13 +72,32 @@ def get_model(name: str) -> LoadedModel:
 # ---------------------------------------------------------------------------
 # Tensor <-> image helpers
 # ---------------------------------------------------------------------------
-def tensor_to_pil(img: torch.Tensor, size: int, smooth: bool) -> Image.Image:
-    """(C,H,W) float in [0,1] -> upscaled PIL image."""
-    arr = (img.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
-    if arr.shape[0] == 1:
-        pil = Image.fromarray(arr[0], mode="L")
+# viridis-ish colour lookup for grayscale spectrograms (no matplotlib needed).
+_VIRIDIS = np.array([[68, 1, 84], [59, 82, 139], [33, 145, 140],
+                     [94, 201, 98], [253, 231, 37]], dtype=np.float64)
+
+
+def _apply_colormap(gray: np.ndarray) -> np.ndarray:
+    """(H,W) float [0,1] -> (H,W,3) uint8 via a viridis-like ramp."""
+    x = np.clip(gray, 0, 1) * (len(_VIRIDIS) - 1)
+    i = np.floor(x).astype(int)
+    i2 = np.minimum(i + 1, len(_VIRIDIS) - 1)
+    f = (x - i)[..., None]
+    rgb = _VIRIDIS[i] * (1 - f) + _VIRIDIS[i2] * f
+    return rgb.astype(np.uint8)
+
+
+def tensor_to_pil(img: torch.Tensor, size: int, smooth: bool,
+                  cmap: bool = False) -> Image.Image:
+    """(C,H,W) float in [0,1] -> upscaled PIL image (RGB if cmap on a 1-channel)."""
+    g = img.clamp(0, 1).cpu().numpy()
+    if g.shape[0] == 1 and cmap:
+        pil = Image.fromarray(_apply_colormap(g[0]), mode="RGB")
+    elif g.shape[0] == 1:
+        pil = Image.fromarray((g[0] * 255).astype(np.uint8), mode="L")
     else:
-        pil = Image.fromarray(np.transpose(arr, (1, 2, 0)), mode="RGB")
+        pil = Image.fromarray((np.transpose(g, (1, 2, 0)) * 255).astype(np.uint8),
+                              mode="RGB")
     resample = Image.LANCZOS if smooth else Image.NEAREST
     return pil.resize((size, size), resample)
 
@@ -287,7 +308,7 @@ def get_map(lm: LoadedModel) -> dict:
         imgs, labels = datamod.load_labeled(lm.name, n=8000)
         Z = _encode_all(lm, imgs)
         labels = np.asarray(labels)
-        use_thumbs = lm.channels == 3            # galaxies: show example images
+        use_thumbs = lm.name != "digits"         # non-digits: show example images
         if Z.shape[1] == 2:
             mean, comp = np.zeros(2), np.eye(2)
             xr = yr = LATENT_RANGE
@@ -311,7 +332,9 @@ def get_map(lm: LoadedModel) -> dict:
                 idxs = np.where(mask)[0]
                 cmean = P[mask].mean(0)
                 j = idxs[np.argmin(((P[mask] - cmean) ** 2).sum(1))]
-                examples[c] = tensor_to_pil(imgs[j], 60, smooth=True)
+                examples[c] = tensor_to_pil(
+                    imgs[j], 60, smooth=True,
+                    cmap=bool(lm.colormap)).convert("RGB")
 
         _MAP_CACHE[lm.name] = {"mean": mean, "comp": comp, "xr": xr, "yr": yr,
                                "clouds": clouds, "labels": label_spots,
@@ -356,7 +379,7 @@ def generate_from_xy(dataset: str, x: float, y: float):
     z = proj_to_latent(m, [x, y])
     zt = torch.tensor(z, dtype=torch.float32).unsqueeze(0)
     img = decode(lm, zt)
-    return (tensor_to_pil(img, BIG, smooth=lm.channels == 3),
+    return (tensor_to_pil(img, BIG, smooth=lm.smooth, cmap=bool(lm.colormap)),
             pad_with_marker(lm, x, y),
             READOUT.format(x, y))
 
@@ -387,7 +410,7 @@ def on_gen_dataset_change(dataset: str):
 def interp_image(lm: LoadedModel, za: torch.Tensor, zb: torch.Tensor, t: float):
     z = (1 - t) * za + t * zb
     img = decode(lm, z.unsqueeze(0))
-    return tensor_to_pil(img, BIG, smooth=lm.channels == 3)
+    return tensor_to_pil(img, BIG, smooth=lm.smooth, cmap=bool(lm.colormap))
 
 
 def trajectory_map(dataset: str, za, zb, t: float):
@@ -429,9 +452,9 @@ def _fresh_endpoints(dataset: str):
     ia, ib = np.random.choice(n, size=2, replace=False)
     za = encode_mu(lm, lm.sample_bank[ia])
     zb = encode_mu(lm, lm.sample_bank[ib])
-    smooth = lm.channels == 3
-    thumb_a = tensor_to_pil(lm.sample_bank[ia], THUMB, smooth)
-    thumb_b = tensor_to_pil(lm.sample_bank[ib], THUMB, smooth)
+    cmap = bool(lm.colormap)
+    thumb_a = tensor_to_pil(lm.sample_bank[ia], THUMB, lm.smooth, cmap=cmap)
+    thumb_b = tensor_to_pil(lm.sample_bank[ib], THUMB, lm.smooth, cmap=cmap)
     blended = interp_image(lm, za, zb, 0.5)
     traj = trajectory_map(dataset, za, zb, 0.5)
     return za, zb, thumb_a, thumb_b, blended, traj, 0.5
@@ -498,7 +521,7 @@ def build_ui() -> gr.Blocks:
             # --- Image generation: click the 2-D latent map -----------
             with gr.Tab("✏️  Image generation"):
                 gen_ds = gr.Radio(
-                    choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
+                    choices=[("Digits", "digits"), ("Gravity Spy", "gravityspy")],
                     value="digits", label="Dataset")
                 with gr.Row(equal_height=False):
                     # Left column: input pad + sliders + readout (all share the
@@ -527,7 +550,7 @@ def build_ui() -> gr.Blocks:
             # --- Morphing: interpolate two samples along a path -------
             with gr.Tab("🔀  Morphing"):
                 dataset = gr.Radio(
-                    choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
+                    choices=[("Digits", "digits"), ("Gravity Spy", "gravityspy")],
                     value="digits", label="Dataset")
                 with gr.Row(equal_height=False):
                     # The morph path drawn on the (projected) latent map.
@@ -594,7 +617,7 @@ if __name__ == "__main__":
     cli = ap.parse_args()
 
     # Eagerly load both models so the booth is responsive from the first tap.
-    for _n in ("digits", "galaxies"):
+    for _n in ("digits", "gravityspy"):
         try:
             get_model(_n)
             print(f"loaded model: {_n}")

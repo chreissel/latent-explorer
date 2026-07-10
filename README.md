@@ -6,26 +6,31 @@ real time**. Once set up, it runs **fully offline on a single laptop**.
 
 ## The teaching point: one engine, two datasets
 
-The **same code** (`vae.py`) trains two variational autoencoders (VAEs). The
-*only* differences are the dataset and the size of the latent space:
+The **same code** (`vae.py`) trains variational autoencoders (VAEs). The *only*
+differences are the dataset and the size of the latent space. The booth app uses
+**Digits** and **Gravity Spy**:
 
-| Model        | Dataset    | Image           | Latent space |
-|--------------|------------|-----------------|--------------|
-| **Digits**   | MNIST      | 28×28 grayscale | **2-D** (fits on a flat pad) |
-| **Galaxies** | Galaxy10 (SDSS) | 69×69 colour, 10 classes | **24-D** |
+| Model          | Dataset | Image | Latent space |
+|----------------|---------|-------|--------------|
+| **Digits**     | MNIST | 28×28 grayscale | **2-D** (fits on a flat pad) |
+| **Gravity Spy**| LIGO glitch spectrograms | 64×64 (Q-transform), 22 classes | **32-D** (shown via PCA) |
+| _Galaxies_     | Galaxy10 (SDSS) | 69×69 colour, 10 classes | 24-D _(still trainable; not shown by default)_ |
 
-It's the identical machine — it just learned two very different things.
+It's the identical machine — it just learned very different things: handwritten
+digits vs. real gravitational-wave detector glitches.
 
 ## What's in the app (Gradio)
 
-- **Digit Explorer** — the 2-D latent space is drawn as one big grid ("a map of
-  everything the model imagines"). **Tap anywhere** on it and the decoded digit
-  appears, upscaled and crisp. X/Y sliders mirror the tap as a fallback.
-- **Morph / Blend** (both datasets) — pick two real images and a slider blends
-  smoothly from one to the other *through latent space*, decoding the
-  in-between images live. Includes a **🎲 Randomize endpoints** button.
-- Tiny 28×28 / 69×69 outputs are upscaled for a booth screen, with a
-  plain-language caption explaining latent space for a general audience.
+- **Image generation** — the latent space is drawn as a **class map** (colour
+  clouds showing where each class lives; digits are labelled with numerals,
+  spectrograms/galaxies with example thumbnails). **Tap anywhere** and the
+  decoded image appears, upscaled. X/Y sliders mirror the tap.
+- **Morphing** (both datasets) — pick two real samples and a slider blends
+  smoothly from one to the other *through latent space*, with the **path drawn
+  live on the map**. Includes a **🎲 Randomize endpoints** button.
+- For datasets whose latent is bigger than 2-D (Gravity Spy 32-D, Galaxy10
+  24-D), the map is a **PCA projection** to 2-D — a shadow of the full space.
+- Gravity Spy spectrograms are colourised (viridis) for a booth-friendly look.
 
 ---
 
@@ -66,8 +71,8 @@ python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_
 ```
 
 ```bash
-# 4. Train both models (downloads MNIST + Galaxy10, then trains; weights -> models/)
-python train.py            # header prints 'on cpu' or 'on cuda' so you can confirm
+# 4. Train the app's models (downloads MNIST + Gravity Spy, then trains -> models/)
+python train.py            # digits + gravityspy; header prints 'on cpu' or 'on cuda'
 ```
 
 > **Tip:** the CPU `--index-url …/whl/cpu` pulls the small CPU build of PyTorch.
@@ -78,10 +83,11 @@ python train.py            # header prints 'on cpu' or 'on cuda' so you can conf
 
 ### Training times (4-core CPU, no GPU)
 
-| Step                 | Approx. time | Notes |
-|----------------------|--------------|-------|
-| Digits (MNIST)       | ~1–2 min     | 20 epochs, 2-D latent |
-| Galaxies (Galaxy10)  | ~3–6 min     | 40 epochs, 24-D latent; first run also downloads ~200 MB |
+| Step                    | Approx. time | Notes |
+|-------------------------|--------------|-------|
+| Digits (MNIST)          | ~1–2 min     | 20 epochs, 2-D latent |
+| Gravity Spy (LIGO)      | ~3–6 min     | 40 epochs, 32-D latent; first run downloads a spectrogram `.h5` |
+| _Galaxies (optional)_   | ~3–6 min     | `--dataset galaxies`; 40 epochs, 24-D latent; ~200 MB download |
 
 Times vary a lot with CPU speed and core count — a recent laptop hits the
 ranges above, while an older or throttled machine can take 3–5× longer. You
@@ -90,18 +96,23 @@ only train once.
 VAE outputs are intentionally a little soft/blurry — that's expected for this
 kind of model, and it makes the morphing look smooth.
 
-#### Offline / no-download galaxy option
-
-If you can't download Galaxy10 (e.g. a restricted network) and just want to see
-the galaxy pipeline work, train on a built-in procedurally-generated stand-in:
+#### Other datasets & offline stand-ins
 
 ```bash
-python train.py --dataset galaxies --synthetic-galaxies
+python train.py --dataset galaxies      # also train the Galaxy10 model (still supported)
+python train.py --dataset all           # digits + gravityspy + galaxies
 ```
 
-This produces galaxy-*like* fuzzy blobs and spirals — fine for a tech demo, but
-**use the real dataset at the booth** for recognizable galaxies (just run
-`python train.py --dataset galaxies` on a connected machine once).
+If a download is blocked (restricted network) and you just want to see the
+pipeline work, train on a built-in procedurally-generated stand-in:
+
+```bash
+python train.py --dataset gravityspy --synthetic   # or --dataset galaxies --synthetic
+```
+
+The stand-ins are fake (glitch-like blobs / fuzzy galaxies) — fine for a tech
+demo, but **use the real data at the booth** (just run the normal command on a
+connected machine once).
 
 ---
 
@@ -138,7 +149,7 @@ external disk), set the `LATENT_DATA_DIR` environment variable before running
 
 ```bash
 export LATENT_DATA_DIR=/mnt/bigdisk/latent-data
-python train.py        # MNIST + Galaxy10 now download under $LATENT_DATA_DIR
+python train.py        # datasets now download under $LATENT_DATA_DIR
 ```
 
 ---
@@ -148,8 +159,8 @@ python train.py        # MNIST + Galaxy10 now download under $LATENT_DATA_DIR
 ```
 latent-explorer/
 ├── vae.py             # The one engine: a configurable conv VAE (shared by both models)
-├── data.py            # Dataset loading/caching (MNIST + Galaxy10, + synthetic stand-in)
-├── train.py           # Trains both models, saves weights to models/
+├── data.py            # Dataset loading/caching (MNIST, Gravity Spy, Galaxy10, + stand-ins)
+├── train.py           # Trains the models, saves weights to models/
 ├── app.py             # Loads weights and launches the Gradio booth UI
 ├── requirements.txt
 └── README.md
@@ -158,9 +169,11 @@ latent-explorer/
 Useful `train.py` flags:
 
 ```bash
-python train.py --dataset digits           # just digits
+python train.py --dataset digits            # just digits
+python train.py --dataset gravityspy        # just Gravity Spy
 python train.py --dataset galaxies          # just galaxies
-python train.py --epochs 30 --latent-dim 24 # override hyperparameters
+python train.py --dataset all               # all three
+python train.py --epochs 60                 # override epochs (train longer)
 ```
 
 ## Booth-day checklist

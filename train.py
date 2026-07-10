@@ -53,7 +53,8 @@ def train_one(
           f"latent_dim={config['latent_dim']}, beta={beta}")
 
     x = datamod.load_dataset(name, max_images=max_images, synthetic=synthetic)
-    src = "SYNTHETIC stand-in" if (synthetic and name == "galaxies") else "real"
+    src = ("SYNTHETIC stand-in"
+           if (synthetic and name in ("galaxies", "gravityspy")) else "real")
     print(f"    dataset: {tuple(x.shape)}  [{src}]")
 
     loader = DataLoader(
@@ -105,27 +106,36 @@ def train_one(
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Train latent-explorer VAEs")
-    p.add_argument("--dataset", choices=["digits", "galaxies", "both"],
-                   default="both")
+    # Default (no --dataset) trains the two datasets the booth app uses:
+    # digits + gravityspy. 'galaxies' and 'all' remain available.
+    p.add_argument("--dataset",
+                   choices=["digits", "galaxies", "gravityspy", "app", "all"],
+                   default="app")
     p.add_argument("--epochs", type=int, default=None,
-                   help="override epochs (default: 20 digits / 40 galaxies)")
+                   help="override epochs (defaults per dataset)")
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--latent-dim", type=int, default=None,
                    help="override latent dimensionality")
     p.add_argument("--beta", type=float, default=None,
-                   help="KL weight (default: 1.0 digits / 2.0 galaxies)")
+                   help="KL weight (default per dataset)")
     p.add_argument("--max-images", type=int, default=None,
-                   help="cap galaxy images (for quick tests)")
-    p.add_argument("--synthetic-galaxies", action="store_true",
-                   help="train galaxies on an offline procedurally-generated "
-                        "stand-in instead of downloading real Galaxy10")
+                   help="cap number of images (for quick tests)")
+    p.add_argument("--synthetic", "--synthetic-galaxies", action="store_true",
+                   dest="synthetic",
+                   help="train galaxies/gravityspy on an offline procedurally-"
+                        "generated stand-in instead of downloading real data")
     args = p.parse_args()
 
-    targets = ["digits", "galaxies"] if args.dataset == "both" else [args.dataset]
+    target_sets = {
+        "app": ["digits", "gravityspy"],
+        "all": ["digits", "galaxies", "gravityspy"],
+    }
+    targets = target_sets.get(args.dataset, [args.dataset])
     defaults = {
         "digits": {"epochs": 20, "beta": 1.0},
         "galaxies": {"epochs": 40, "beta": 2.0},
+        "gravityspy": {"epochs": 40, "beta": 1.5},
     }
     for name in targets:
         train_one(
@@ -136,7 +146,7 @@ def main() -> None:
             latent_dim=args.latent_dim,
             beta=args.beta if args.beta is not None else defaults[name]["beta"],
             max_images=args.max_images,
-            synthetic=args.synthetic_galaxies,
+            synthetic=args.synthetic,
         )
 
 

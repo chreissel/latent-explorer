@@ -31,6 +31,15 @@ GALAXY10_URLS = [
     "https://www.astro.utoronto.ca/~hleung/shared/Galaxy10/Galaxy10.h5",
 ]
 
+# Gravity Spy training set (LIGO glitch Q-transform spectrograms), 8535 samples,
+# 22 classes, 4 durations each. Single .h5 hosted on Zenodo.
+GRAVITYSPY_PATH = os.path.join(DATA_DIR, "trainingsetv1d1.h5")
+GRAVITYSPY_URLS = [
+    "https://zenodo.org/records/1486046/files/trainingsetv1d1.h5?download=1",
+    "https://zenodo.org/records/1476551/files/trainingsetv1d1.h5?download=1",
+]
+GRAVITYSPY_SIZE = 64          # spectrograms resized to this square for the VAE
+
 
 # --- MNIST ---------------------------------------------------------------
 def load_mnist(train: bool = True) -> torch.Tensor:
@@ -136,6 +145,117 @@ def load_galaxy10_labeled(n: int | None = None):
     return x, y
 
 
+# --- Gravity Spy (LIGO glitch spectrograms) -----------------------------
+def _download(name: str, urls: list, dest: str) -> str:
+    """Download `dest` from the first working mirror in `urls` (with progress)."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if os.path.exists(dest) and os.path.getsize(dest) > 1_000_000:
+        return dest
+    import requests
+
+    last_err: Exception | None = None
+    for url in urls:
+        try:
+            print(f"Downloading {name} from {url} ...")
+            with requests.get(url, stream=True, timeout=90) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                done = 0
+                tmp = dest + ".part"
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            print(f"\r  {done/1e6:6.1f} MB / {total/1e6:6.1f} MB "
+                                  f"({100*done/total:5.1f}%)", end="", flush=True)
+                print()
+                os.replace(tmp, dest)
+            return dest
+        except Exception as e:
+            last_err = e
+            print(f"  failed: {e}")
+    raise RuntimeError(
+        f"Could not download {name} from any mirror. Place the file manually at "
+        f"{dest}. Last error: {last_err}"
+    )
+
+
+def download_gravityspy() -> str:
+    return _download("Gravity Spy", GRAVITYSPY_URLS, GRAVITYSPY_PATH)
+
+
+def _gravityspy_walk(f, duration="2.0"):
+    """Yield (image_array, label_name) for one duration from the Gravity Spy h5.
+
+    Layout: /<label>/<train|validation|test>/<gravityspy_id>/<duration>.png,
+    each dataset shaped (1, 140, 170).
+    """
+    for label in f.keys():
+        g = f[label]
+        if not hasattr(g, "keys"):
+            continue
+        for stype in g.keys():
+            gs = g[stype]
+            if not hasattr(gs, "keys"):
+                continue
+            for gid in gs.keys():
+                node = gs[gid]
+                if not hasattr(node, "keys"):
+                    continue
+                key = f"{duration}.png"
+                if key not in node:
+                    imgs = [k for k in node.keys()]
+                    if not imgs:
+                        continue
+                    key = imgs[len(imgs) // 2]
+                yield np.asarray(node[key], dtype=np.float32), label
+
+
+def _prep_spectrogram(arr: np.ndarray) -> torch.Tensor:
+    """(1,H,W)/(H,W)/(H,W,3) intensity array -> (1, SIZE, SIZE) in [0,1]."""
+    import torch.nn.functional as F
+
+    if arr.ndim == 2:
+        arr = arr[None]
+    elif arr.ndim == 3 and arr.shape[-1] in (3, 4):
+        arr = arr[..., :3].mean(-1)[None]      # RGB spectrogram -> intensity
+    elif arr.ndim == 3 and arr.shape[0] in (3, 4):
+        arr = arr[:3].mean(0)[None]
+    t = torch.from_numpy(np.ascontiguousarray(arr)).float()
+    if float(t.max()) > 1.0:
+        t = t / 255.0
+    t = F.interpolate(t.unsqueeze(0), size=(GRAVITYSPY_SIZE, GRAVITYSPY_SIZE),
+                      mode="bilinear", align_corners=False).squeeze(0)
+    return t.clamp(0, 1)
+
+
+def load_gravityspy_labeled(n: int | None = None):
+    """Return (images, labels): images (N,1,64,64) in [0,1], labels (N,) glitch
+    class indices (0..21). Downloads the Gravity Spy .h5 if not cached."""
+    import h5py
+
+    path = download_gravityspy()
+    imgs, labs, label_names = [], [], {}
+    with h5py.File(path, "r") as f:
+        names = sorted(k for k in f.keys() if hasattr(f[k], "keys"))
+        label_names = {name: i for i, name in enumerate(names)}
+        for arr, label in _gravityspy_walk(f):
+            imgs.append(_prep_spectrogram(arr))
+            labs.append(label_names[label])
+    x = torch.stack(imgs)
+    y = torch.tensor(labs, dtype=torch.long)
+    if n is not None and n < x.size(0):
+        idx = torch.randperm(x.size(0))[:n]
+        x, y = x[idx], y[idx]
+    return x, y
+
+
+def load_gravityspy(max_images: int | None = None) -> torch.Tensor:
+    x, _ = load_gravityspy_labeled(n=max_images)
+    return x
+
+
 # --- Synthetic galaxy stand-in ------------------------------------------
 # A procedurally-generated "galaxy-like" dataset (fuzzy elliptical bulges with
 # optional spiral arms, varied colour/orientation/brightness) at the SAME shape
@@ -188,6 +308,48 @@ def synthetic_galaxies(n: int = 6000, seed: int = 0, return_labels: bool = False
     return x
 
 
+# --- Synthetic Gravity Spy stand-in -------------------------------------
+# Procedurally-generated glitch-like spectrograms (grayscale, 64x64) with a few
+# distinct morphologies, so the Gravity Spy pipeline and app can be tested fully
+# OFFLINE without the Zenodo download. NOT real LIGO data.
+def synthetic_spectrograms(n: int = 6000, seed: int = 0,
+                           return_labels: bool = False):
+    rng = np.random.default_rng(seed)
+    S = GRAVITYSPY_SIZE
+    yy, xx = np.mgrid[0:S, 0:S].astype(np.float32)
+    out = np.zeros((n, 1, S, S), dtype=np.float32)
+    labels = np.zeros(n, dtype=np.int64)
+    for i in range(n):
+        c = int(rng.integers(0, 6))
+        img = np.zeros((S, S), dtype=np.float32)
+        if c == 0:                                   # Blip: short vertical streak
+            cx = rng.uniform(0.3, 0.7) * S
+            img += np.exp(-((xx - cx) ** 2) / (2 * rng.uniform(2, 4) ** 2))
+        elif c == 1:                                 # Whistle: rising chirp curve
+            f = 0.15 + 0.7 * (xx / S) ** 2
+            img += np.exp(-((yy / S - f) ** 2) / (2 * 0.004))
+        elif c == 2:                                 # Scattered light: stacked arches
+            for k in range(1, 4):
+                arch = 0.5 * S + 0.12 * S * k * np.sin(np.pi * xx / S)
+                img += np.exp(-((yy - arch) ** 2) / (2 * 3.0 ** 2))
+        elif c == 3:                                 # Koi fish: central blob
+            img += np.exp(-(((xx - S / 2) ** 2 + (yy - S / 2) ** 2)) /
+                          (2 * rng.uniform(6, 10) ** 2))
+        elif c == 4:                                 # Line: horizontal band
+            ly = rng.uniform(0.3, 0.7) * S
+            img += np.exp(-((yy - ly) ** 2) / (2 * rng.uniform(2, 4) ** 2))
+        else:                                        # Low-freq: bottom blob
+            img += np.exp(-((xx - S / 2) ** 2 + (yy - 0.8 * S) ** 2) /
+                          (2 * rng.uniform(8, 12) ** 2))
+        img += rng.normal(0, 0.03, size=img.shape)
+        out[i, 0] = np.clip(img / (img.max() + 1e-6), 0, 1)
+        labels[i] = c
+    x = torch.from_numpy(out)
+    if return_labels:
+        return x, torch.from_numpy(labels)
+    return x
+
+
 def load_dataset(
     name: str, max_images: int | None = None, synthetic: bool = False
 ) -> torch.Tensor:
@@ -197,13 +359,16 @@ def load_dataset(
         if synthetic:
             return synthetic_galaxies(n=max_images or 6000)
         return load_galaxy10(max_images=max_images)
+    if name == "gravityspy":
+        if synthetic:
+            return synthetic_spectrograms(n=max_images or 6000)
+        return load_gravityspy(max_images=max_images)
     raise ValueError(f"Unknown dataset: {name}")
 
 
 def load_labeled(name: str, n: int | None = None):
-    """(images, labels) for building a latent class-map. For galaxies, uses the
-    real Galaxy10 (with morphology labels) and falls back to the labelled
-    synthetic stand-in if the .h5 can't be fetched (offline testing)."""
+    """(images, labels) for building a latent class-map. Real datasets fall back
+    to their labelled synthetic stand-in if the download can't be fetched."""
     if name == "digits":
         return load_mnist_labeled(n=n)
     if name == "galaxies":
@@ -211,4 +376,9 @@ def load_labeled(name: str, n: int | None = None):
             return load_galaxy10_labeled(n=n)
         except Exception:
             return synthetic_galaxies(n=n or 6000, return_labels=True)
+    if name == "gravityspy":
+        try:
+            return load_gravityspy_labeled(n=n)
+        except Exception:
+            return synthetic_spectrograms(n=n or 6000, return_labels=True)
     raise ValueError(f"Unknown dataset: {name}")

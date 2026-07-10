@@ -157,6 +157,15 @@ MODEL_CONFIGS = {
         "weights": "models/galaxies.pt",
         "display_name": "Galaxies (Galaxy10)",
     },
+    "gravityspy": {
+        "img_channels": 1,          # Q-transform spectrograms (intensity)
+        "img_size": 64,
+        "latent_dim": 32,
+        "hidden_channels": (32, 64, 128, 256),
+        "weights": "models/gravityspy.pt",
+        "display_name": "Gravity Spy (LIGO glitches)",
+        "colormap": "viridis",      # colourise the grayscale spectrograms
+    },
 }
 
 
