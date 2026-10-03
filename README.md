@@ -114,6 +114,22 @@ The stand-ins are fake (glitch-like blobs / fuzzy galaxies) — fine for a tech
 demo, but **use the real data at the booth** (just run the normal command on a
 connected machine once).
 
+### Share trained models so others don't retrain
+
+Each trained `.pt` **bakes in its latent map**, so the weights are fully
+self-contained: a person who clones the repo with the committed weights runs the
+app **offline with no retraining and no dataset download**. To share them:
+
+```bash
+python train.py            # train on a connected machine (real data)
+git add models/digits.pt models/gravityspy.pt
+git commit -m "Add trained booth weights"
+git push
+```
+
+The weights are small (digits ~2 MB, gravityspy ~10 MB). Anyone who then clones
+the repo just runs `python app.py` — no `train.py` needed.
+
 ---
 
 ## Run the booth (works fully offline once trained)

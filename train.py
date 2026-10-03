@@ -91,6 +91,20 @@ def train_one(
     idx = torch.randperm(x.size(0))[:N_SAMPLE_BANK]
     sample_bank = x[idx].clone().cpu()
 
+    # Bake the latent map into the checkpoint so the app (and anyone who clones
+    # the repo with these weights) runs with NO dataset download and NO retrain.
+    baked_map = None
+    try:
+        import app
+        model.eval()
+        map_imgs, map_labels = datamod.load_labeled(name, n=6000)
+        m = app.build_map_data(model, name, config["img_channels"],
+                               config.get("colormap"), map_imgs, map_labels)
+        baked_map = app.serialize_map(m)
+        print(f"    baked latent map ({len(m['labels'])} classes)")
+    except Exception as e:
+        print(f"    (could not bake latent map: {e}; app will build it live)")
+
     os.makedirs(MODELS_DIR, exist_ok=True)
     out_path = config["weights"]
     torch.save(
@@ -98,6 +112,7 @@ def train_one(
             "state_dict": model.state_dict(),
             "config": config,
             "sample_bank": sample_bank,
+            "map": baked_map,
         },
         out_path,
     )

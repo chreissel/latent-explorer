@@ -58,6 +58,7 @@ class LoadedModel:
         self.latent_dim = config["latent_dim"]
         self.colormap = config.get("colormap")   # e.g. "viridis" for gravityspy
         self.smooth = name != "digits"            # crisp pixels only for digits
+        self.baked_map = ckpt.get("map")          # precomputed latent map, if any
 
 
 MODELS: dict[str, LoadedModel] = {}
@@ -179,11 +180,11 @@ def _load_font(size: int):
 # digits, PCA (top-2 principal components) for galaxies. The map, the pad and
 # the morph path all live in this projected plane. Moving in it changes the two
 # most important latent directions while the rest stay at the data average.
-def _encode_all(lm: LoadedModel, imgs: torch.Tensor, bs: int = 512) -> np.ndarray:
+def _encode_all(model, imgs: torch.Tensor, bs: int = 512) -> np.ndarray:
     outs = []
     with torch.no_grad():
         for i in range(0, imgs.size(0), bs):
-            mu, _ = lm.model.encode(imgs[i:i + bs].to(DEVICE))
+            mu, _ = model.encode(imgs[i:i + bs].to(DEVICE))
             outs.append(mu.cpu().numpy())
     return np.concatenate(outs, axis=0)
 
@@ -299,46 +300,78 @@ def _draw_labels(img: Image.Image, m: dict) -> Image.Image:
 _MAP_CACHE: dict[str, dict] = {}
 
 
+def build_map_data(model, name: str, channels: int, colormap, imgs, labels):
+    """Build the 2-D latent map (projection + colour clouds + labels + example
+    thumbnails) from a model and labelled samples. Pure (no gradio) so train.py
+    can call it to BAKE the map into the checkpoint."""
+    Z = _encode_all(model, imgs)
+    labels = np.asarray(labels)
+    use_thumbs = name != "digits"                # non-digits: show example images
+    if Z.shape[1] == 2:
+        mean, comp = np.zeros(2), np.eye(2)
+        xr = yr = LATENT_RANGE
+        P = Z
+    else:
+        mean = Z.mean(0)
+        Zc = Z - mean
+        _, _, Vt = np.linalg.svd(Zc, full_matrices=False)
+        comp = Vt[:2]                            # top-2 principal directions
+        P = Zc @ comp.T
+        xr = float(np.percentile(np.abs(P[:, 0]), 98)) * 1.15 + 1e-6
+        yr = float(np.percentile(np.abs(P[:, 1]), 98)) * 1.15 + 1e-6
+    clouds, label_spots = _clouds_from_points(
+        P, labels, 560, xr, yr, min_dist=72.0 if use_thumbs else 46.0)
+
+    examples = {}
+    if use_thumbs:
+        for _, _, c in label_spots:              # representative image per class
+            mask = labels == c
+            idxs = np.where(mask)[0]
+            cmean = P[mask].mean(0)
+            j = idxs[np.argmin(((P[mask] - cmean) ** 2).sum(1))]
+            examples[c] = tensor_to_pil(imgs[j], 60, smooth=True,
+                                        cmap=bool(colormap)).convert("RGB")
+    return {"mean": mean, "comp": comp, "xr": xr, "yr": yr,
+            "clouds": clouds, "labels": label_spots, "examples": examples}
+
+
+def serialize_map(m: dict) -> dict:
+    """Map dict -> plain numpy/py types for torch.save (bake into a checkpoint)."""
+    return {
+        "mean": np.asarray(m["mean"], dtype=np.float32),
+        "comp": np.asarray(m["comp"], dtype=np.float32),
+        "xr": float(m["xr"]), "yr": float(m["yr"]),
+        "clouds": np.asarray(m["clouds"].convert("RGB"), dtype=np.uint8),
+        "labels": [(float(px), float(py), int(c)) for px, py, c in m["labels"]],
+        "examples": {int(c): np.asarray(t.convert("RGB"), dtype=np.uint8)
+                     for c, t in m["examples"].items()},
+    }
+
+
+def deserialize_map(d: dict) -> dict:
+    return {
+        "mean": np.asarray(d["mean"], dtype=np.float64),
+        "comp": np.asarray(d["comp"], dtype=np.float64),
+        "xr": float(d["xr"]), "yr": float(d["yr"]),
+        "clouds": Image.fromarray(np.asarray(d["clouds"], dtype=np.uint8), "RGB"),
+        "labels": [(float(px), float(py), int(c)) for px, py, c in d["labels"]],
+        "examples": {int(c): Image.fromarray(np.asarray(a, dtype=np.uint8), "RGB")
+                     for c, a in d["examples"].items()},
+    }
+
+
 def get_map(lm: LoadedModel) -> dict:
-    """Cached 2-D latent map for a model: projection + colour clouds + labels.
-    Identity projection for a 2-D latent (digits); PCA for higher-D (galaxies).
-    """
+    """Cached 2-D latent map for a model. Uses the map BAKED into the checkpoint
+    when present (so a cloned repo needs no dataset at all); otherwise builds it
+    live from the labelled dataset (downloading/caching as needed)."""
     if lm.name not in _MAP_CACHE:
-        import data as datamod
-        imgs, labels = datamod.load_labeled(lm.name, n=8000)
-        Z = _encode_all(lm, imgs)
-        labels = np.asarray(labels)
-        use_thumbs = lm.name != "digits"         # non-digits: show example images
-        if Z.shape[1] == 2:
-            mean, comp = np.zeros(2), np.eye(2)
-            xr = yr = LATENT_RANGE
-            P = Z
+        if lm.baked_map is not None:
+            _MAP_CACHE[lm.name] = deserialize_map(lm.baked_map)
         else:
-            mean = Z.mean(0)
-            Zc = Z - mean
-            _, _, Vt = np.linalg.svd(Zc, full_matrices=False)
-            comp = Vt[:2]                       # top-2 principal directions
-            P = Zc @ comp.T
-            xr = float(np.percentile(np.abs(P[:, 0]), 98)) * 1.15 + 1e-6
-            yr = float(np.percentile(np.abs(P[:, 1]), 98)) * 1.15 + 1e-6
-        clouds, label_spots = _clouds_from_points(
-            P, labels, 560, xr, yr, min_dist=72.0 if use_thumbs else 46.0)
-
-        examples = {}
-        if use_thumbs:
-            # A representative image per class: the one nearest the class centre.
-            for _, _, c in label_spots:
-                mask = labels == c
-                idxs = np.where(mask)[0]
-                cmean = P[mask].mean(0)
-                j = idxs[np.argmin(((P[mask] - cmean) ** 2).sum(1))]
-                examples[c] = tensor_to_pil(
-                    imgs[j], 60, smooth=True,
-                    cmap=bool(lm.colormap)).convert("RGB")
-
-        _MAP_CACHE[lm.name] = {"mean": mean, "comp": comp, "xr": xr, "yr": yr,
-                               "clouds": clouds, "labels": label_spots,
-                               "examples": examples}
+            import data as datamod
+            imgs, labels = datamod.load_labeled(lm.name, n=8000)
+            _MAP_CACHE[lm.name] = build_map_data(
+                lm.model, lm.name, lm.channels, lm.colormap, imgs, labels)
     return _MAP_CACHE[lm.name]
 
 

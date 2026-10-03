@@ -6,9 +6,15 @@ venv/
 latent-env/
 *.egg-info/
 
-# Datasets (downloaded on first run) and trained weights (produced by train.py)
+# Datasets are downloaded on first run and NOT committed.
 data/
-models/
+
+# Trained weights (produced by train.py) CAN be committed so others run offline
+# without retraining -- each .pt bakes in its latent map. Commit them explicitly:
+#   git add models/*.pt
+# Ignore everything else under models/ (e.g. the empty dir / scratch files).
+models/*
+!models/*.pt
 
 # Gradio / misc
 flagged/
