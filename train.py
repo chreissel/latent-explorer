@@ -33,6 +33,19 @@ def get_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _augment(batch: torch.Tensor) -> torch.Tensor:
+    """Random flips + a random 90-degree rotation per batch. Valid only for
+    orientation-free, SQUARE images (galaxies) -- not digits or spectrograms."""
+    if torch.rand(1).item() < 0.5:
+        batch = torch.flip(batch, dims=[3])          # horizontal flip
+    if torch.rand(1).item() < 0.5:
+        batch = torch.flip(batch, dims=[2])          # vertical flip
+    k = int(torch.randint(0, 4, (1,)).item())        # 0/90/180/270 degrees
+    if k:
+        batch = torch.rot90(batch, k, dims=[2, 3])
+    return batch
+
+
 def train_one(
     name: str,
     epochs: int,
@@ -42,19 +55,21 @@ def train_one(
     beta: float,
     max_images: int | None,
     synthetic: bool = False,
+    augment: bool = False,
 ) -> None:
     device = get_device()
     config = dict(MODEL_CONFIGS[name])
     if latent_dim is not None:
         config["latent_dim"] = latent_dim
 
+    aug = augment and name != "digits"   # rotations ruin digits (6<->9); skip them
     print(f"\n=== Training '{name}' ({config['display_name']}) on {device} ===")
     print(f"    img {config['img_channels']}x{config['img_size']}x{config['img_size']}, "
-          f"latent_dim={config['latent_dim']}, beta={beta}")
+          f"latent_dim={config['latent_dim']}, beta={beta}"
+          f"{', augment' if aug else ''}")
 
     x = datamod.load_dataset(name, max_images=max_images, synthetic=synthetic)
-    src = ("SYNTHETIC stand-in"
-           if (synthetic and name in ("galaxies", "gravityspy")) else "real")
+    src = "SYNTHETIC stand-in" if (synthetic and name == "galaxies") else "real"
     print(f"    dataset: {tuple(x.shape)}  [{src}]")
 
     loader = DataLoader(
@@ -74,6 +89,8 @@ def train_one(
         tot, tot_bce, tot_kld, n = 0.0, 0.0, 0.0, 0
         for (batch,) in loader:
             batch = batch.to(device)
+            if aug:
+                batch = _augment(batch)
             opt.zero_grad()
             recon, mu, logvar = model(batch)
             loss, bce, kld = vae_loss(recon, batch, mu, logvar, beta=beta)
@@ -121,36 +138,32 @@ def train_one(
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Train latent-explorer VAEs")
-    # Default (no --dataset) trains the two datasets the booth app uses:
-    # digits + gravityspy. 'galaxies' and 'all' remain available.
-    p.add_argument("--dataset",
-                   choices=["digits", "galaxies", "gravityspy", "app", "all"],
-                   default="app")
+    p.add_argument("--dataset", choices=["digits", "galaxies", "both"],
+                   default="both")
     p.add_argument("--epochs", type=int, default=None,
-                   help="override epochs (defaults per dataset)")
+                   help="override epochs (default: 20 digits / 40 galaxies)")
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--latent-dim", type=int, default=None,
                    help="override latent dimensionality")
     p.add_argument("--beta", type=float, default=None,
-                   help="KL weight (default per dataset)")
+                   help="KL weight (default: 1.0 digits / 2.0 galaxies)")
     p.add_argument("--max-images", type=int, default=None,
                    help="cap number of images (for quick tests)")
     p.add_argument("--synthetic", "--synthetic-galaxies", action="store_true",
                    dest="synthetic",
-                   help="train galaxies/gravityspy on an offline procedurally-"
-                        "generated stand-in instead of downloading real data")
+                   help="train galaxies on an offline procedurally-generated "
+                        "stand-in instead of downloading real Galaxy10")
+    p.add_argument("--augment", action="store_true",
+                   help="random flips + 90-deg rotations during training "
+                        "(applied to galaxies only; galaxies have no preferred "
+                        "orientation, so this is free extra data and sharpens them)")
     args = p.parse_args()
 
-    target_sets = {
-        "app": ["digits", "gravityspy"],
-        "all": ["digits", "galaxies", "gravityspy"],
-    }
-    targets = target_sets.get(args.dataset, [args.dataset])
+    targets = ["digits", "galaxies"] if args.dataset == "both" else [args.dataset]
     defaults = {
         "digits": {"epochs": 20, "beta": 1.0},
         "galaxies": {"epochs": 40, "beta": 2.0},
-        "gravityspy": {"epochs": 40, "beta": 1.5},
     }
     for name in targets:
         train_one(
@@ -162,6 +175,7 @@ def main() -> None:
             beta=args.beta if args.beta is not None else defaults[name]["beta"],
             max_images=args.max_images,
             synthetic=args.synthetic,
+            augment=args.augment,
         )
 
 

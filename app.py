@@ -4,8 +4,7 @@ latent-explorer booth app.
 Loads the two trained VAEs and launches a touch-friendly Gradio interface for a
 science-fair booth. Runs fully offline once the weights exist in ./models.
 
-Two ways to play, for two datasets (handwritten digits and LIGO "Gravity Spy"
-glitch spectrograms):
+Two ways to play, for two datasets (handwritten digits and galaxies):
   * Image generation -- click anywhere on the 2D latent "map" and watch the
                         image the model imagines at that spot.
   * Morphing         -- pick two real samples and slide to blend smoothly from
@@ -56,7 +55,7 @@ class LoadedModel:
         self.channels = config["img_channels"]
         self.size = config["img_size"]
         self.latent_dim = config["latent_dim"]
-        self.colormap = config.get("colormap")   # e.g. "viridis" for gravityspy
+        self.colormap = config.get("colormap")   # optional display colourmap
         self.smooth = name != "digits"            # crisp pixels only for digits
         self.baked_map = ckpt.get("map")          # precomputed latent map, if any
 
@@ -554,7 +553,7 @@ def build_ui() -> gr.Blocks:
             # --- Image generation: click the 2-D latent map -----------
             with gr.Tab("✏️  Image generation"):
                 gen_ds = gr.Radio(
-                    choices=[("Digits", "digits"), ("Gravity Spy", "gravityspy")],
+                    choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
                     value="digits", label="Dataset")
                 with gr.Row(equal_height=False):
                     # Left column: input pad + sliders + readout (all share the
@@ -583,7 +582,7 @@ def build_ui() -> gr.Blocks:
             # --- Morphing: interpolate two samples along a path -------
             with gr.Tab("🔀  Morphing"):
                 dataset = gr.Radio(
-                    choices=[("Digits", "digits"), ("Gravity Spy", "gravityspy")],
+                    choices=[("Digits", "digits"), ("Galaxies", "galaxies")],
                     value="digits", label="Dataset")
                 with gr.Row(equal_height=False):
                     # The morph path drawn on the (projected) latent map.
@@ -650,7 +649,7 @@ if __name__ == "__main__":
     cli = ap.parse_args()
 
     # Eagerly load both models so the booth is responsive from the first tap.
-    for _n in ("digits", "gravityspy"):
+    for _n in ("digits", "galaxies"):
         try:
             get_model(_n)
             print(f"loaded model: {_n}")
