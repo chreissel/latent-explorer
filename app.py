@@ -57,6 +57,7 @@ class LoadedModel:
         self.latent_dim = config["latent_dim"]
         self.colormap = config.get("colormap")   # optional display colourmap
         self.smooth = name != "digits"            # crisp pixels only for digits
+        self.stretch = name == "galaxies"         # brighten dark galaxy images
         self.baked_map = ckpt.get("map")          # precomputed latent map, if any
 
 
@@ -87,10 +88,21 @@ def _apply_colormap(gray: np.ndarray) -> np.ndarray:
     return rgb.astype(np.uint8)
 
 
+def _display_stretch(g: np.ndarray) -> np.ndarray:
+    """Per-image contrast stretch for dark astronomical images: normalize to the
+    bright end, then asinh to lift faint structure so galaxies are visible."""
+    x = np.clip(g, 0, 1)
+    hi = float(np.percentile(x, 99.5))
+    x = np.clip(x / (hi + 1e-6), 0, 1)
+    return np.clip(np.arcsinh(6.0 * x) / np.arcsinh(6.0), 0, 1)
+
+
 def tensor_to_pil(img: torch.Tensor, size: int, smooth: bool,
-                  cmap: bool = False) -> Image.Image:
+                  cmap: bool = False, stretch: bool = False) -> Image.Image:
     """(C,H,W) float in [0,1] -> upscaled PIL image (RGB if cmap on a 1-channel)."""
     g = img.clamp(0, 1).cpu().numpy()
+    if stretch:
+        g = _display_stretch(g)
     if g.shape[0] == 1 and cmap:
         pil = Image.fromarray(_apply_colormap(g[0]), mode="RGB")
     elif g.shape[0] == 1:
@@ -299,7 +311,8 @@ def _draw_labels(img: Image.Image, m: dict) -> Image.Image:
 _MAP_CACHE: dict[str, dict] = {}
 
 
-def build_map_data(model, name: str, channels: int, colormap, imgs, labels):
+def build_map_data(model, name: str, channels: int, colormap, imgs, labels,
+                   stretch: bool = False):
     """Build the 2-D latent map (projection + colour clouds + labels + example
     thumbnails) from a model and labelled samples. Pure (no gradio) so train.py
     can call it to BAKE the map into the checkpoint."""
@@ -329,7 +342,8 @@ def build_map_data(model, name: str, channels: int, colormap, imgs, labels):
             cmean = P[mask].mean(0)
             j = idxs[np.argmin(((P[mask] - cmean) ** 2).sum(1))]
             examples[c] = tensor_to_pil(imgs[j], 60, smooth=True,
-                                        cmap=bool(colormap)).convert("RGB")
+                                        cmap=bool(colormap),
+                                        stretch=stretch).convert("RGB")
     return {"mean": mean, "comp": comp, "xr": xr, "yr": yr,
             "clouds": clouds, "labels": label_spots, "examples": examples}
 
@@ -370,7 +384,8 @@ def get_map(lm: LoadedModel) -> dict:
             import data as datamod
             imgs, labels = datamod.load_labeled(lm.name, n=8000)
             _MAP_CACHE[lm.name] = build_map_data(
-                lm.model, lm.name, lm.channels, lm.colormap, imgs, labels)
+                lm.model, lm.name, lm.channels, lm.colormap, imgs, labels,
+                stretch=lm.stretch)
     return _MAP_CACHE[lm.name]
 
 
@@ -411,7 +426,8 @@ def generate_from_xy(dataset: str, x: float, y: float):
     z = proj_to_latent(m, [x, y])
     zt = torch.tensor(z, dtype=torch.float32).unsqueeze(0)
     img = decode(lm, zt)
-    return (tensor_to_pil(img, BIG, smooth=lm.smooth, cmap=bool(lm.colormap)),
+    return (tensor_to_pil(img, BIG, smooth=lm.smooth, cmap=bool(lm.colormap),
+                          stretch=lm.stretch),
             pad_with_marker(lm, x, y),
             READOUT.format(x, y))
 
@@ -442,7 +458,8 @@ def on_gen_dataset_change(dataset: str):
 def interp_image(lm: LoadedModel, za: torch.Tensor, zb: torch.Tensor, t: float):
     z = (1 - t) * za + t * zb
     img = decode(lm, z.unsqueeze(0))
-    return tensor_to_pil(img, BIG, smooth=lm.smooth, cmap=bool(lm.colormap))
+    return tensor_to_pil(img, BIG, smooth=lm.smooth, cmap=bool(lm.colormap),
+                         stretch=lm.stretch)
 
 
 def trajectory_map(dataset: str, za, zb, t: float):
@@ -485,8 +502,10 @@ def _fresh_endpoints(dataset: str):
     za = encode_mu(lm, lm.sample_bank[ia])
     zb = encode_mu(lm, lm.sample_bank[ib])
     cmap = bool(lm.colormap)
-    thumb_a = tensor_to_pil(lm.sample_bank[ia], THUMB, lm.smooth, cmap=cmap)
-    thumb_b = tensor_to_pil(lm.sample_bank[ib], THUMB, lm.smooth, cmap=cmap)
+    thumb_a = tensor_to_pil(lm.sample_bank[ia], THUMB, lm.smooth, cmap=cmap,
+                            stretch=lm.stretch)
+    thumb_b = tensor_to_pil(lm.sample_bank[ib], THUMB, lm.smooth, cmap=cmap,
+                            stretch=lm.stretch)
     blended = interp_image(lm, za, zb, 0.5)
     traj = trajectory_map(dataset, za, zb, 0.5)
     return za, zb, thumb_a, thumb_b, blended, traj, 0.5

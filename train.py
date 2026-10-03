@@ -116,7 +116,8 @@ def train_one(
         model.eval()
         map_imgs, map_labels = datamod.load_labeled(name, n=6000)
         m = app.build_map_data(model, name, config["img_channels"],
-                               config.get("colormap"), map_imgs, map_labels)
+                               config.get("colormap"), map_imgs, map_labels,
+                               stretch=(name == "galaxies"))
         baked_map = app.serialize_map(m)
         print(f"    baked latent map ({len(m['labels'])} classes)")
     except Exception as e:
